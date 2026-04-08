@@ -147,11 +147,16 @@ jobs:
       - name: Override with hidden test set (if configured)
         # Set the repository secret HIDDEN_TEST_NPZ_URL to a direct download URL.
         # The file will replace data/test.npz before evaluation runs.
-        if: ${{ secrets.HIDDEN_TEST_NPZ_URL != '' }}
+        env:
+          HIDDEN_TEST_NPZ_URL: ${{ secrets.HIDDEN_TEST_NPZ_URL }}
         run: |
-          echo "Downloading hidden test set..."
-          curl -fsSL "${{ secrets.HIDDEN_TEST_NPZ_URL }}" -o data/test.npz
-          echo "Hidden test.npz in place."
+          if [ -n "$HIDDEN_TEST_NPZ_URL" ]; then
+            echo "Downloading hidden test set..."
+            curl -fsSL "$HIDDEN_TEST_NPZ_URL" -o data/test.npz
+            echo "Hidden test.npz in place."
+          else
+            echo "No hidden test set configured, using public test.npz."
+          fi
 
       # ── Find changed submission ─────────────────────────────────────────────
       - name: Detect changed submission directory
@@ -314,10 +319,16 @@ jobs:
           EOF
 
       - name: Override with hidden test set (if configured)
-        if: ${{ secrets.HIDDEN_TEST_NPZ_URL != '' }}
+        env:
+          HIDDEN_TEST_NPZ_URL: ${{ secrets.HIDDEN_TEST_NPZ_URL }}
         run: |
-          echo "Downloading hidden test set..."
-          curl -fsSL "${{ secrets.HIDDEN_TEST_NPZ_URL }}" -o data/test.npz
+          if [ -n "$HIDDEN_TEST_NPZ_URL" ]; then
+            echo "Downloading hidden test set..."
+            curl -fsSL "$HIDDEN_TEST_NPZ_URL" -o data/test.npz
+            echo "Hidden test.npz in place."
+          else
+            echo "No hidden test set configured, using public test.npz."
+          fi
 
       # Re-evaluate every submission so the leaderboard reflects the canonical
       # test set (especially important when switching to the hidden test set).
