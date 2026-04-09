@@ -10,7 +10,8 @@ Ranked by **Realtime RPA (clean condition)** — Raw Pitch Accuracy of the strea
 
 | Rank | Student | RPA Clean ↑ | RPA 0 dB ↑ | RPA -5 dB ↑ | VAD Acc ↑ | Median Err ↓ | Note |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | Charis Test | 94.8% | 87.3% | 88.0% | 98.3% | 6.5¢ | Baseline run with default hyperparameters (gru_size=96, cond_size=64, lr=1e-3). |
+| 1 | Charis NoiseAugBaseline | 96.6% | 88.8% | 87.8% | 97.3% | 12.1¢ | Baseline run with default hyperparameters, and the baseline noise augmentation (gru_size=96, cond_size=64, lr=1e-3). |
+| 2 | Charis Test | 94.8% | 87.3% | 88.0% | 98.3% | 6.5¢ | Baseline run with default hyperparameters (gru_size=96, cond_size=64, lr=1e-3). |
 
 ---
 
