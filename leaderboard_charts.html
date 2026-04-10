@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NanoPitch Leaderboard Charts</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f5f7fa;
+      color: #1a1a2e;
+      margin: 0;
+      padding: 1.5rem;
+    }
+    h1 { font-size: 1.6rem; margin-bottom: 0.2rem; }
+    .subtitle { color: #555; font-size: 0.9rem; margin-bottom: 2rem; }
+    h2 { font-size: 1.1rem; margin: 2rem 0 0.8rem; color: #333; border-bottom: 2px solid #ddd; padding-bottom: 0.3rem; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    .card {
+      background: #fff;
+      border-radius: 10px;
+      padding: 1.2rem 1.5rem;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.08);
+    }
+    .card h3 { margin: 0 0 0.8rem; font-size: 0.95rem; color: #444; }
+    canvas { max-height: 280px; }
+    .full-width { grid-column: 1 / -1; }
+    .full-width canvas { max-height: 320px; }
+    @media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>NanoPitch Student Leaderboard</h1>
+  <p class="subtitle">
+    2 submissions &nbsp;·&nbsp; Last updated: 2026-04-10 &nbsp;·&nbsp;
+    Realtime Viterbi decoder &nbsp;·&nbsp;
+    <a href="LEADERBOARD.md">Static MD table</a>
+  </p>
+
+  <h2>Summary — 4 Key Metrics</h2>
+  <div class="grid-2">
+    <div class="card">
+      <h3>RPA — Clean Audio ↑ (higher is better)</h3>
+      <canvas id="rpaCleanchart"></canvas>
+    </div>
+    <div class="card">
+      <h3>RPA — Macro Average across all SNR conditions ↑</h3>
+      <canvas id="rpaMacrochart"></canvas>
+    </div>
+    <div class="card">
+      <h3>Gross Error Rate — Clean Audio ↓ (lower is better)</h3>
+      <canvas id="gerCleanchart"></canvas>
+    </div>
+    <div class="card">
+      <h3>Gross Error Rate — Macro Average across all SNR conditions ↓</h3>
+      <canvas id="gerMacrochart"></canvas>
+    </div>
+  </div>
+
+  <h2>Performance Across Noise Conditions</h2>
+  <div class="grid-2">
+    <div class="card full-width">
+      <h3>RPA by SNR Condition ↑</h3>
+      <canvas id="rpaSnrchart"></canvas>
+    </div>
+    <div class="card full-width">
+      <h3>Gross Error Rate by SNR Condition ↓</h3>
+      <canvas id="gerSnrchart"></canvas>
+    </div>
+  </div>
+
+<script>
+const D = {
+  "labels": [
+    "Charis NoiseAugBaseline",
+    "Charis Test"
+  ],
+  "colors": [
+    "#4C72B0",
+    "#DD8452"
+  ],
+  "snr_labels": [
+    "Clean",
+    "\u22125 dB",
+    "0 dB",
+    "+5 dB",
+    "+10 dB",
+    "+20 dB"
+  ],
+  "rpa_by_snr": [
+    [
+      96.61,
+      87.79,
+      88.81,
+      92.32,
+      93.45,
+      92.37
+    ],
+    [
+      94.82,
+      88.04,
+      87.32,
+      89.04,
+      89.75,
+      92.21
+    ]
+  ],
+  "ger_by_snr": [
+    [
+      3.39,
+      12.21,
+      11.19,
+      7.68,
+      6.55,
+      7.63
+    ],
+    [
+      5.18,
+      11.96,
+      12.68,
+      10.96,
+      10.25,
+      7.79
+    ]
+  ],
+  "rpa_clean": [
+    96.61,
+    94.82
+  ],
+  "rpa_macro": [
+    91.89,
+    90.2
+  ],
+  "ger_clean": [
+    3.39,
+    5.18
+  ],
+  "ger_macro": [
+    8.11,
+    9.8
+  ]
+};
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+function barDatasets(values, alpha) {
+  return D.labels.map((label, i) => ({
+    label,
+    data: [values[i]],
+    backgroundColor: D.colors[i] + (alpha || "cc"),
+    borderColor:     D.colors[i],
+    borderWidth: 1.5,
+    borderRadius: 5,
+  }));
+}
+
+function lineDatasets() {
+  return D.labels.map((label, i) => ({
+    label,
+    data: D.rpa_by_snr[i],
+    borderColor: D.colors[i],
+    backgroundColor: D.colors[i] + "30",
+    borderWidth: 2.5,
+    pointRadius: 5,
+    tension: 0.3,
+    fill: false,
+  }));
+}
+
+function gerLineDatasets() {
+  return D.labels.map((label, i) => ({
+    label,
+    data: D.ger_by_snr[i],
+    borderColor: D.colors[i],
+    backgroundColor: D.colors[i] + "30",
+    borderWidth: 2.5,
+    pointRadius: 5,
+    tension: 0.3,
+    fill: false,
+  }));
+}
+
+const pctOptions = (suffix, legendPos) => ({
+  responsive: true,
+  plugins: {
+    legend: { position: legendPos || "top", labels: { boxWidth: 14, font: { size: 11 } } },
+    tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}${suffix}` } },
+  },
+  scales: {
+    y: { ticks: { callback: v => v + suffix }, beginAtZero: false },
+    x: { grid: { display: false } },
+  },
+});
+
+// ── summary bar charts ────────────────────────────────────────────────────────
+
+new Chart(document.getElementById("rpaCleanchart"), {
+  type: "bar",
+  data: { labels: ["RPA Clean"], datasets: barDatasets(D.rpa_clean) },
+  options: pctOptions("%"),
+});
+
+new Chart(document.getElementById("rpaMacrochart"), {
+  type: "bar",
+  data: { labels: ["RPA Macro Avg"], datasets: barDatasets(D.rpa_macro) },
+  options: pctOptions("%"),
+});
+
+new Chart(document.getElementById("gerCleanchart"), {
+  type: "bar",
+  data: { labels: ["GER Clean"], datasets: barDatasets(D.ger_clean) },
+  options: pctOptions("%"),
+});
+
+new Chart(document.getElementById("gerMacrochart"), {
+  type: "bar",
+  data: { labels: ["GER Macro Avg"], datasets: barDatasets(D.ger_macro) },
+  options: pctOptions("%"),
+});
+
+// ── per-SNR line charts ───────────────────────────────────────────────────────
+
+new Chart(document.getElementById("rpaSnrchart"), {
+  type: "line",
+  data: { labels: D.snr_labels, datasets: lineDatasets() },
+  options: {
+    ...pctOptions("%", "top"),
+    scales: {
+      y: { min: 0, max: 100, ticks: { callback: v => v + "%" } },
+      x: { grid: { color: "#eee" } },
+    },
+  },
+});
+
+new Chart(document.getElementById("gerSnrchart"), {
+  type: "line",
+  data: { labels: D.snr_labels, datasets: gerLineDatasets() },
+  options: {
+    ...pctOptions("%", "top"),
+    scales: {
+      y: { min: 0, ticks: { callback: v => v + "%" } },
+      x: { grid: { color: "#eee" } },
+    },
+  },
+});
+</script>
+</body>
+</html>
