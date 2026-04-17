@@ -185,7 +185,8 @@ class NanoPitchDataset(Dataset):
 import random
 import torch
 
-def specaugment(mel, time_mask_param=20, freq_mask_param=8):
+def specaugment(mel, time_mask_param=10, freq_mask_param=3,
+                m_freq=2, m_time=2, prob=0.5, fill=-10.0):
     """
     Apply SpecAugment to log-mel spectrogram.
 
@@ -197,27 +198,37 @@ def specaugment(mel, time_mask_param=20, freq_mask_param=8):
         The maximum length of the time mask (in frames)
     freq_mask_param : int
         The maximum length of the frequency mask (in mel bands)
+    m_freq : int
+        The number of frequency masks to apply
+    m_time : int
+        The number of time masks to apply
+    prob : float
+        The probability of applying the augmentation
+    fill : float
+        The value to fill the masked regions with
 
     Returns
     -------
-    Tensor : Augmented mel spectrogram
+    Tensor, shape (B, T, N_MELS) — augmented mel
     """
 
     B, T, N_MELS = mel.shape
+    mel_aug = mel.clone()
 
     # Frequency masking
-    freq_mask = random.randint(0, freq_mask_param)
     for b in range(B):
-        f0 = random.randint(0, N_MELS - freq_mask)
-        mel[b, :, f0:f0 + freq_mask] = 0
+        if random.random() < prob:
+            for _ in range(m_freq):
+                freq_mask_width = random.randint(0, freq_mask_param)
+                mask_freq = random.randint(0, N_MELS - freq_mask_width)
+                mel_aug[b, :, mask_freq:mask_freq + freq_mask_width] = fill
 
-    # Time masking
-    time_mask = random.randint(0, time_mask_param)
-    for b in range(B):
-        t0 = random.randint(0, T - time_mask)
-        mel[b, t0:t0 + time_mask, :] = 0
+            for _ in range(m_time):
+                time_mask_width = random.randint(0, time_mask_param)
+                mask_time = random.randint(0, T - time_mask_width)
+                mel_aug[b, mask_time:mask_time + time_mask_width, :] = fill
 
-    return mel
+    return mel_aug
 
 def augment_mel_batch(mel_clean, mel_noise, snr_range, device, use_specaug=False):
     """Training-time augmentation: mix clean and noise log-mel.
@@ -267,9 +278,10 @@ def augment_mel_batch(mel_clean, mel_noise, snr_range, device, use_specaug=False
     mel_mix = torch.logaddexp(mel_clean, mel_noise + gain)
 
     if use_specaug:
-        mel_mix = specaugment(mel_mix)
-
-    return mel_mix
+        mel_aug = specaugment(mel_mix)
+        return mel_aug
+    else:
+        return mel_mix
 
 
 
