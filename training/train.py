@@ -336,8 +336,6 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, writer,
         loss.backward()        # compute new gradients
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)  # prevent exploding gradients
         optimizer.step()       # update weights
-        scheduler.step()       # decay learning rate
-
         # ── Logging ──
         running['loss'] += loss.item()
         running['vad'] += vad_loss.item()
@@ -356,13 +354,11 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, writer,
             "with an oversized batch-size). Returning NaN loss for this epoch.",
             RuntimeWarning,
         )
-        writer.add_scalar("train/lr", scheduler.get_last_lr()[0], epoch)
         return float("nan")
 
     # Log to TensorBoard (view with: tensorboard --logdir ./runs/exp1/tb)
     for key in running:
         writer.add_scalar(f"train/{key}", running[key] / n_batches, epoch)
-    writer.add_scalar("train/lr", scheduler.get_last_lr()[0], epoch)
     return running['loss'] / n_batches
 
 
@@ -521,23 +517,9 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                    betas=(0.8, 0.98), eps=1e-8)
 
-    # Learning rate scheduler — student exercise.
-    #
-    # The stub below holds the learning rate constant throughout training.
-    # Replace it with a real schedule to improve convergence — for example:
-    #
-    #   Cosine annealing with warm restarts (Loshchilov & Hutter, 2017):
-    #     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    #         optimizer, T_0=10, T_mult=2, eta_min=1e-5)
-    #
-    #   Simple inverse-decay:
-    #     scheduler = torch.optim.lr_scheduler.LambdaLR(
-    #         optimizer, lr_lambda=lambda step: 1.0 / (1.0 + 5e-5 * step))
-    #
-    # Call scheduler.step() once per batch (inside train_one_epoch) or once
-    # per epoch (here, after train_one_epoch returns), depending on the type.
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lr_lambda=lambda step: 1.0)  # constant LR — replace me
+    # Learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=10, T_mult=2, eta_min=1e-5)
 
     # TensorBoard writer for visualizing training progress
     writer = SummaryWriter(log_dir=os.path.join(output_dir, "tb"))
@@ -550,6 +532,10 @@ def main():
                                      writer, epoch, device, args)
         dt = time.time() - t0
         print(f"  Epoch {epoch} done in {dt:.1f}s, loss={train_loss:.5f}")
+
+        # Step the LR schedule once per epoch and record
+        writer.add_scalar("train/lr", scheduler.get_last_lr()[0], epoch)
+        scheduler.step()       # decay learning rate
 
         # Evaluate every 5 epochs (and on the first epoch)
         if epoch % 5 == 0 or epoch == start_epoch:
