@@ -319,10 +319,14 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, writer,
         # VAD loss: standard binary cross-entropy
         vad_loss = bce(pred_vad.squeeze(-1), vad_target).mean()
 
-        # Pitch loss: BCE on the 360-dim posteriorgram, but weighted
-        # by VAD — we don't penalize pitch errors on silent frames
-        voiced_weight = vad_target.unsqueeze(-1)  # (B, T, 1)
-        pitch_loss = (voiced_weight * bce(pred_pitch, pitch_target)).mean()
+        # Pitch loss: mean BCE over voiced-frame pitch bins. Normalising
+        # by the voiced-element count (rather than dividing by total
+        # B*T*PITCH_BINS as a naive .mean() would) prevents the loss from
+        # being silently scaled down by the unvoiced fraction of the batch.
+        voiced_weight = voiced_mask                                # (B, T, 1)
+        pitch_bce = bce(pred_pitch, pitch_target)                  # (B, T, 360)
+        denom = voiced_weight.sum().clamp(min=1.0) * PITCH_BINS
+        pitch_loss = (voiced_weight * pitch_bce).sum() / denom
 
         # Combined loss (weighted sum)
         loss = args.w_vad * vad_loss + args.w_pitch * pitch_loss
