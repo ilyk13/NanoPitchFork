@@ -54,7 +54,10 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(__file__))
-from model import NanoPitch, f0_to_posteriorgram, PITCH_BINS, N_MELS
+from model import (
+    NanoPitch, f0_to_posteriorgram, PITCH_BINS, N_MELS,
+    PITCH_FMIN, PITCH_CENTS_PER_BIN,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -287,19 +290,26 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, writer,
         mel_clean = mel_clean.to(device)
         mel_noise = mel_noise.to(device)
         vad_target = vad_target.to(device)
+        f0_target = f0_target.to(device)
         B = mel_clean.size(0)
         T = mel_clean.size(1)
 
-        # Build pitch posteriorgram target on-the-fly from f0 values.
-        # This saves huge amounts of RAM (f0 is 1 float vs 360 for full posterior).
-        pitch_target = torch.zeros(B, T, PITCH_BINS, device=device)
-        f0_np = f0_target.numpy()
-        for b in range(B):
-            pg = f0_to_posteriorgram(f0_np[b], n_frames=T)
-            pitch_target[b] = torch.from_numpy(pg)
+        # Build pitch posteriorgram target on-the-fly from f0 values, on-device
+        # and fully vectorised (no per-batch Python loop, no extra H2D copies).
+        # Each voiced frame gets a Gaussian centred on its true pitch bin;
+        # unvoiced frames stay all-zero.
+        bin_indices = torch.arange(PITCH_BINS, device=device).view(1, 1, -1)
+        f0_safe = f0_target.clamp(min=1e-10)
+        bins = (1200.0 * torch.log2(f0_safe / PITCH_FMIN)
+                / PITCH_CENTS_PER_BIN).unsqueeze(-1)             # (B, T, 1)
+        sigma_bins = 1.2
+        pitch_target = torch.exp(-0.5 * ((bin_indices - bins) / sigma_bins) ** 2)
+        voiced_mask = (f0_target > 0).float().unsqueeze(-1)       # (B, T, 1)
+        pitch_target = pitch_target * voiced_mask
 
-        # ── Data augmentation (implement in augment_mel_batch) ──
-        mel_mix = augment_mel_batch(mel_clean, mel_noise, args.snr_range, device, True)
+        # ── Data augmentation ──
+        mel_mix = augment_mel_batch(mel_clean, mel_noise, args.snr_range,
+                                    device, args.use_specaug)
 
         # ── Forward Pass ──
         # Causal convs → output same length as input, no trimming needed
