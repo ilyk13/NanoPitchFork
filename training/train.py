@@ -492,23 +492,20 @@ def main():
     model = NanoPitch(cond_size=args.cond_size, gru_size=args.gru_size)
     start_epoch = 1
 
-    # Optionally resume from a checkpoint
+    # Optionally resume from a checkpoint. We restore model weights here and
+    # stash the rest of the payload; optimizer/scheduler state_dicts are
+    # applied further down, once those objects exist.
+    resume_ckpt = None
     if args.resume:
         warnings.warn(
             "Loading checkpoint via torch.load() executes Python deserialization. "
             "Only use checkpoints from trusted sources.",
             RuntimeWarning,
         )
-        ckpt = torch.load(args.resume, map_location="cpu")
-        model.load_state_dict(ckpt["state_dict"])
-        start_epoch = ckpt.get("epoch", 0) + 1
+        resume_ckpt = torch.load(args.resume, map_location="cpu")
+        model.load_state_dict(resume_ckpt["state_dict"])
+        start_epoch = resume_ckpt.get("epoch", 0) + 1
         print(f"Resumed from epoch {start_epoch - 1}")
-        warnings.warn(
-            "Resume currently restores model weights/epoch only; optimizer and "
-            "scheduler state are not restored, so resumed optimization dynamics "
-            "will differ from uninterrupted training.",
-            RuntimeWarning,
-        )
 
     model.to(device)
 
@@ -525,6 +522,28 @@ def main():
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer, T_0=10, T_mult=2, eta_min=1e-5)
+
+    # Restore optimizer + scheduler state from the resume checkpoint, if any.
+    # Checkpoints written by older revisions of this script lack these keys;
+    # warn and continue so older runs can still be resumed (imperfectly).
+    if resume_ckpt is not None:
+        if "optimizer" in resume_ckpt:
+            optimizer.load_state_dict(resume_ckpt["optimizer"])
+        else:
+            warnings.warn(
+                "Checkpoint predates optimizer-state saving; AdamW moments "
+                "restart from zero for this resume.",
+                RuntimeWarning,
+            )
+        if "scheduler" in resume_ckpt:
+            scheduler.load_state_dict(resume_ckpt["scheduler"])
+        else:
+            warnings.warn(
+                "Checkpoint predates scheduler-state saving; LR schedule "
+                "restarts from T_0 for this resume.",
+                RuntimeWarning,
+            )
+        del resume_ckpt
 
     # TensorBoard writer for visualizing training progress
     writer = SummaryWriter(log_dir=os.path.join(output_dir, "tb"))
@@ -546,8 +565,13 @@ def main():
         if epoch % 5 == 0 or epoch == start_epoch:
             evaluate(model, data_dir, writer, epoch, device, args)
 
-        # Save checkpoint after every epoch
-        ckpt = {"epoch": epoch, "state_dict": model.state_dict(),
+        # Save checkpoint after every epoch. optimizer + scheduler state are
+        # included so --resume can continue optimization without restarting
+        # momentum/schedule from scratch.
+        ckpt = {"epoch": epoch,
+                "state_dict": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
                 "model_kwargs": {"cond_size": args.cond_size,
                                  "gru_size": args.gru_size},
                 "loss": train_loss}
