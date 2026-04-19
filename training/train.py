@@ -110,6 +110,16 @@ parser.add_argument("--w-vad", type=float, default=0.1,
 parser.add_argument("--w-pitch", type=float, default=1.0,
                     help="weight for pitch loss")
 
+# Pitch target / loss shaping. Narrower sigma + pos_weight > 1 pushes the
+# pitch head to produce a taller peak on voiced frames, which is what lifts
+# Viterbi's max_post > voicing_threshold gate and therefore lifts VDR.
+parser.add_argument("--pitch-sigma-bins", type=float, default=0.8,
+                    help="Gaussian width of the pitch posteriorgram target "
+                         "(in bins; 20 cents per bin). Narrower = taller peak.")
+parser.add_argument("--pitch-pos-weight", type=float, default=5.0,
+                    help="pos_weight for pitch BCE; up-weights the small "
+                         "number of near-peak bins vs. the 350+ near-zero bins.")
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Dataset
@@ -281,9 +291,12 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, writer,
                     epoch, device, args):
     model.train()  # enable dropout, batch norm, etc. (if any)
     # BCEWithLogitsLoss fuses sigmoid + BCE into one numerically-stable op,
-    # so we ask the model for raw logits below (return_logits=True). Also a
-    # prerequisite for adding pos_weight / focal loss to the VAD head.
-    bce = nn.BCEWithLogitsLoss(reduction='none')
+    # so we ask the model for raw logits below (return_logits=True). The
+    # pitch loss also up-weights positive targets so the few high-mass bins
+    # near the true pitch aren't drowned out by the 350+ near-zero bins.
+    bce_vad = nn.BCEWithLogitsLoss(reduction='none')
+    pitch_pos_weight = torch.tensor(args.pitch_pos_weight, device=device)
+    bce_pitch = nn.BCEWithLogitsLoss(reduction='none', pos_weight=pitch_pos_weight)
     running = {'loss': 0, 'vad': 0, 'pitch': 0}
     n_batches = 0
 
@@ -305,7 +318,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, writer,
         f0_safe = f0_target.clamp(min=1e-10)
         bins = (1200.0 * torch.log2(f0_safe / PITCH_FMIN)
                 / PITCH_CENTS_PER_BIN).unsqueeze(-1)             # (B, T, 1)
-        sigma_bins = 1.2
+        sigma_bins = args.pitch_sigma_bins
         pitch_target = torch.exp(-0.5 * ((bin_indices - bins) / sigma_bins) ** 2)
         voiced_mask = (f0_target > 0).float().unsqueeze(-1)       # (B, T, 1)
         pitch_target = pitch_target * voiced_mask
@@ -322,14 +335,14 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, writer,
 
         # ── Loss Computation ──
         # VAD loss: standard binary cross-entropy
-        vad_loss = bce(pred_vad.squeeze(-1), vad_target).mean()
+        vad_loss = bce_vad(pred_vad.squeeze(-1), vad_target).mean()
 
         # Pitch loss: mean BCE over voiced-frame pitch bins. Normalising
         # by the voiced-element count (rather than dividing by total
         # B*T*PITCH_BINS as a naive .mean() would) prevents the loss from
         # being silently scaled down by the unvoiced fraction of the batch.
         voiced_weight = voiced_mask                                # (B, T, 1)
-        pitch_bce = bce(pred_pitch, pitch_target)                  # (B, T, 360)
+        pitch_bce = bce_pitch(pred_pitch, pitch_target)            # (B, T, 360)
         denom = voiced_weight.sum().clamp(min=1.0) * PITCH_BINS
         pitch_loss = (voiced_weight * pitch_bce).sum() / denom
 
