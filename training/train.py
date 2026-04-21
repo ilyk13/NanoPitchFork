@@ -107,7 +107,7 @@ parser.add_argument("--snr-range", type=float, nargs=2, default=[-5.0, 20.0],
 # Loss weights — adjust to prioritize VAD vs pitch accuracy
 parser.add_argument("--w-vad", type=float, default=0.1,
                     help="weight for VAD loss")
-parser.add_argument("--w-pitch", type=float, default=1.0,
+parser.add_argument("--w-pitch", type=float, default=5.0,
                     help="weight for pitch loss")
 
 # Pitch target / loss shaping. Narrower sigma + pos_weight > 1 pushes the
@@ -197,55 +197,9 @@ class NanoPitchDataset(Dataset):
 
         return mel_clean, mel_noise, vad, f0
 
-import random
 import torch
 
-def specaugment(mel, time_mask_param=10, freq_mask_param=3,
-                m_freq=2, m_time=2, prob=0.5, fill=-10.0):
-    """
-    Apply SpecAugment to log-mel spectrogram.
-
-    Parameters
-    ----------
-    mel : Tensor, shape (B, T, N_MELS)
-        The log-mel spectrogram (batch, time, freq)
-    time_mask_param : int
-        The maximum length of the time mask (in frames)
-    freq_mask_param : int
-        The maximum length of the frequency mask (in mel bands)
-    m_freq : int
-        The number of frequency masks to apply
-    m_time : int
-        The number of time masks to apply
-    prob : float
-        The probability of applying the augmentation
-    fill : float
-        The value to fill the masked regions with
-
-    Returns
-    -------
-    Tensor, shape (B, T, N_MELS) — augmented mel
-    """
-
-    B, T, N_MELS = mel.shape
-    mel_aug = mel.clone()
-
-    # Frequency masking
-    for b in range(B):
-        if random.random() < prob:
-            for _ in range(m_freq):
-                freq_mask_width = random.randint(0, freq_mask_param)
-                mask_freq = random.randint(0, N_MELS - freq_mask_width)
-                mel_aug[b, :, mask_freq:mask_freq + freq_mask_width] = fill
-
-            for _ in range(m_time):
-                time_mask_width = random.randint(0, time_mask_param)
-                mask_time = random.randint(0, T - time_mask_width)
-                mel_aug[b, mask_time:mask_time + time_mask_width, :] = fill
-
-    return mel_aug
-
-def augment_mel_batch(mel_clean, mel_noise, snr_range, device, use_specaug=False):
+def augment_mel_batch(mel_clean, mel_noise, snr_range, device):
     """Training-time augmentation: mix clean and noise log-mel.
 
     Parameters
@@ -275,12 +229,7 @@ def augment_mel_batch(mel_clean, mel_noise, snr_range, device, use_specaug=False
 
     mel_mix = torch.logaddexp(mel_clean, mel_noise + gain)
 
-    if use_specaug:
-        mel_aug = specaugment(mel_mix)
-        return mel_aug
-    else:
-        return mel_mix
-
+    return mel_mix
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -323,9 +272,8 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, writer,
         voiced_mask = (f0_target > 0).float().unsqueeze(-1)       # (B, T, 1)
         pitch_target = pitch_target * voiced_mask
 
-        # ── Data augmentation ──
-        mel_mix = augment_mel_batch(mel_clean, mel_noise, args.snr_range,
-                                    device, args.use_specaug)
+        # ── Data augmentation (implement in augment_mel_batch) ──
+        mel_mix = augment_mel_batch(mel_clean, mel_noise, args.snr_range, device)
 
         # ── Forward Pass ──
         # Causal convs → output same length as input, no trimming needed.
@@ -335,16 +283,13 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, writer,
 
         # ── Loss Computation ──
         # VAD loss: standard binary cross-entropy
-        vad_loss = bce_vad(pred_vad.squeeze(-1), vad_target).mean()
+        vad_weight = 0.5 * (1- vad_target) + 3.0 * vad_target 
+        vad_loss = (vad_weight * bce(pred_vad.squeeze(-1), vad_target)).mean()
 
-        # Pitch loss: mean BCE over voiced-frame pitch bins. Normalising
-        # by the voiced-element count (rather than dividing by total
-        # B*T*PITCH_BINS as a naive .mean() would) prevents the loss from
-        # being silently scaled down by the unvoiced fraction of the batch.
-        voiced_weight = voiced_mask                                # (B, T, 1)
-        pitch_bce = bce_pitch(pred_pitch, pitch_target)            # (B, T, 360)
-        denom = voiced_weight.sum().clamp(min=1.0) * PITCH_BINS
-        pitch_loss = (voiced_weight * pitch_bce).sum() / denom
+        # Pitch loss: BCE on the 360-dim posteriorgram, but weighted
+        # by VAD — we don't penalize pitch errors on silent frames
+        voiced_weight = vad_target.unsqueeze(-1)  
+        pitch_loss = (voiced_weight * bce(pred_pitch, pitch_target)).mean()
 
         # Combined loss (weighted sum)
         loss = args.w_vad * vad_loss + args.w_pitch * pitch_loss
@@ -424,6 +369,10 @@ def evaluate(model, data_dir, writer, epoch, device, args):
 
         # Decode predicted posteriorgram to f0
         f0d = viterbi_decode(pp)
+        if i == 0:
+            print(f"  [diag] clip 0: pitch post max={pp.max():.3f} "
+                  f"mean_max={pp.max(axis=1).mean():.3f} "
+                  f"vad_mean={pv.mean():.3f}")
 
         # VAD accuracy: fraction of frames with correct voice/silence label
         vacc = float(np.mean((pv > 0.5) == (vr > 0.5)))
@@ -532,31 +481,31 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                    betas=(0.8, 0.98), eps=1e-8)
 
-    # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=10, T_mult=2, eta_min=1e-5)
-
-    # Restore optimizer + scheduler state from the resume checkpoint, if any.
-    # Checkpoints written by older revisions of this script lack these keys;
-    # warn and continue so older runs can still be resumed (imperfectly).
-    if resume_ckpt is not None:
-        if "optimizer" in resume_ckpt:
-            optimizer.load_state_dict(resume_ckpt["optimizer"])
-        else:
-            warnings.warn(
-                "Checkpoint predates optimizer-state saving; AdamW moments "
-                "restart from zero for this resume.",
-                RuntimeWarning,
-            )
-        if "scheduler" in resume_ckpt:
-            scheduler.load_state_dict(resume_ckpt["scheduler"])
-        else:
-            warnings.warn(
-                "Checkpoint predates scheduler-state saving; LR schedule "
-                "restarts from T_0 for this resume.",
-                RuntimeWarning,
-            )
-        del resume_ckpt
+    # Learning rate scheduler — student exercise.
+    #
+    # The stub below holds the learning rate constant throughout training.
+    # Replace it with a real schedule to improve convergence — for example:
+    #
+    #   Cosine annealing with warm restarts (Loshchilov & Hutter, 2017):
+    #     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    #         optimizer, T_0=10, T_mult=2, eta_min=1e-5)
+    #
+    #   Simple inverse-decay:
+    #     scheduler = torch.optim.lr_scheduler.LambdaLR(
+    #         optimizer, lr_lambda=lambda step: 1.0 / (1.0 + 5e-5 * step))
+    #
+    # Call scheduler.step() once per batch (inside train_one_epoch) or once
+    # per epoch (here, after train_one_epoch returns), depending on the type.
+    '''scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda=lambda step: 1.0)  # constant LR — replace me
+    '''
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=args.lr,
+    steps_per_epoch=len(dataloader),
+    epochs=args.epochs,
+    pct_start=0.1        # 10% of training is warmup
+    )
 
     # TensorBoard writer for visualizing training progress
     writer = SummaryWriter(log_dir=os.path.join(output_dir, "tb"))
