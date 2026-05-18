@@ -1109,6 +1109,259 @@ void nanopitch_free_weights(NanoPitchWeights *w) {
     free(w);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Prosody: analytic DSP on NN outputs (centralized; NN heads may override). */
+/* -------------------------------------------------------------------------- */
+
+#define NP_VAD_VOICED 0.35f
+#define NP_VAD_SILENT 0.2f
+#define NP_RMS_SILENT_DB (-50.f)
+#define NP_CENTS_JUMP_NOTE 140.f
+#define NP_TRANS_HALO_FRAMES 8
+#define NP_SILENCE_BREAK_FRAMES 12
+#define NP_FRAME_HZ 100.f
+#define NP_VIB_RING_MAX 96
+
+static float np_audio_rms_db(const float *audio_frame, int n) {
+    double s = 0.0;
+    for (int i = 0; i < n; i++) {
+        double t = (double)audio_frame[i];
+        s += t * t;
+    }
+    float m = (float)(s / (double)n);
+    return 10.f * log10f(m + 1e-10f);
+}
+
+static float np_mel_tilt(const float *mel) {
+    float sx = 0.f, sy = 0.f, sxx = 0.f, sxy = 0.f;
+    const float nf = (float)NC_N_MELS;
+    for (int i = 0; i < NC_N_MELS; i++) {
+        float x = (float)i;
+        float y = mel[i];
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+    }
+    float d = nf * sxx - sx * sx;
+    if (fabsf(d) < 1e-12f) return 0.f;
+    return (nf * sxy - sx * sy) / d;
+}
+
+static float np_median_positive_f0(const float *ring, int len) {
+    float tmp[5];
+    int k = 0;
+    for (int i = 0; i < len; i++) {
+        float v = ring[i];
+        if (v > 0.f && !isnan(v) && !isinf(v)) tmp[k++] = v;
+    }
+    if (k == 0) return 0.f;
+    for (int i = 1; i < k; i++) {
+        float key = tmp[i];
+        int j = i - 1;
+        while (j >= 0 && tmp[j] > key) {
+            tmp[j + 1] = tmp[j];
+            j--;
+        }
+        tmp[j + 1] = key;
+    }
+    if ((k % 2) == 1) return tmp[k / 2];
+    return 0.5f * (tmp[k / 2 - 1] + tmp[k / 2]);
+}
+
+static void np_f0_ring_push(float *ring, int *len, float f0) {
+    float v = (f0 > 0.f) ? f0 : 0.f;
+    if (*len < 5) {
+        ring[(*len)++] = v;
+    } else {
+        memmove(ring, ring + 1, 4 * sizeof(float));
+        ring[4] = v;
+    }
+}
+
+static void np_vib_ring_push(NanoPitchState *st, float log2f0) {
+    if (st->prosody_vib_n < NP_VIB_RING_MAX) {
+        st->prosody_vib_log2[st->prosody_vib_n++] = log2f0;
+    } else {
+        memmove(st->prosody_vib_log2, st->prosody_vib_log2 + 1,
+                (NP_VIB_RING_MAX - 1) * sizeof(float));
+        st->prosody_vib_log2[NP_VIB_RING_MAX - 1] = log2f0;
+    }
+}
+
+static void np_vib_ring_trim(NanoPitchState *st) {
+    if (st->prosody_vib_n > 15) {
+        int keep = 12;
+        memmove(st->prosody_vib_log2, st->prosody_vib_log2 + (st->prosody_vib_n - keep),
+                keep * sizeof(float));
+        st->prosody_vib_n = keep;
+    }
+}
+
+static void np_vibrato_from_detrended(const float *det, int n,
+                                      float *rate_hz, float *depth_cents,
+                                      float *stability, int *active) {
+    *rate_hz = 0.f;
+    *depth_cents = 0.f;
+    *stability = 0.f;
+    *active = 0;
+    if (n < 28 || n > NP_VIB_RING_MAX) return;
+
+    float minv = det[0], maxv = det[0];
+    for (int i = 1; i < n; i++) {
+        if (det[i] < minv) minv = det[i];
+        if (det[i] > maxv) maxv = det[i];
+    }
+    *depth_cents = ((maxv - minv) * 0.5f) * 1200.f;
+
+    float mean = 0.f;
+    for (int i = 0; i < n; i++) mean += det[i];
+    mean /= (float)n;
+
+    float x[96];
+    float den = 0.f;
+    for (int i = 0; i < n; i++) {
+        x[i] = det[i] - mean;
+        den += x[i] * x[i];
+    }
+    if (den < 1e-12f) return;
+
+    int lag_min = (int)fmaxf(3.f, floorf(NP_FRAME_HZ / 9.f));
+    int lag_max = (int)fminf(floorf(NP_FRAME_HZ / 3.8f), n - 3);
+    if (lag_max < lag_min) return;
+
+    float best_corr = 0.f;
+    int best_lag = 0;
+    for (int lag = lag_min; lag <= lag_max; lag++) {
+        float num = 0.f;
+        for (int i = lag; i < n; i++) num += x[i] * x[i - lag];
+        float corr = num / den;
+        if (corr > best_corr) {
+            best_corr = corr;
+            best_lag = lag;
+        }
+    }
+
+    float rh = (best_lag > 0) ? (NP_FRAME_HZ / (float)best_lag) : 0.f;
+    *rate_hz = rh;
+    *stability = best_corr;
+    if (best_corr > 0.32f && rh >= 4.f && rh <= 8.8f &&
+        *depth_cents >= 22.f && *depth_cents < 140.f) {
+        *active = 1;
+    }
+}
+
+static void np_prosody_clear_output(NanoPitchOutput *out) {
+    out->prosody_note_id = 0.f;
+    out->prosody_is_transition = 0.f;
+    out->prosody_vibrato_active = 0.f;
+    out->prosody_vibrato_rate_hz = 0.f;
+    out->prosody_vibrato_depth_cents = 0.f;
+    out->prosody_vibrato_stability = 0.f;
+    out->prosody_smooth_rms_db = 0.f;
+    out->prosody_mel_tilt = 0.f;
+    out->prosody_raw_rms_db = 0.f;
+}
+
+static void np_prosody_step(NanoPitchState *st, const float *audio_frame,
+                            NanoPitchOutput *out) {
+    float rms_db = np_audio_rms_db(audio_frame, NC_HOP_LENGTH);
+    out->prosody_raw_rms_db = rms_db;
+    out->prosody_mel_tilt = np_mel_tilt(out->mel);
+
+    float alpha = 0.12f;
+    st->prosody_ema_db = st->prosody_ema_db * (1.f - alpha) + rms_db * alpha;
+    out->prosody_smooth_rms_db = st->prosody_ema_db;
+
+    float f0 = out->f0_hz;
+    float vad = out->vad;
+    int fi = st->prosody_frame_idx;
+
+    np_f0_ring_push(st->prosody_f0_ring, &st->prosody_f0_ring_len, f0);
+    float sm = np_median_positive_f0(st->prosody_f0_ring, st->prosody_f0_ring_len);
+
+    int voiced = (f0 > 0.f && vad >= NP_VAD_VOICED);
+    int silent = (vad < NP_VAD_SILENT || rms_db < NP_RMS_SILENT_DB);
+
+    int is_trans = (fi <= st->prosody_transition_until);
+    int note_id = 0;
+
+    if (!voiced || silent) {
+        st->prosody_silent_frames++;
+        if (st->prosody_silent_frames >= NP_SILENCE_BREAK_FRAMES) {
+            st->prosody_in_note = 0;
+        }
+        note_id = st->prosody_note_counter > 0 ? st->prosody_note_counter : 0;
+        is_trans = is_trans || (st->prosody_silent_frames > 0 && st->prosody_silent_frames < 4);
+    } else {
+        st->prosody_silent_frames = 0;
+
+        if (!st->prosody_in_note) {
+            st->prosody_in_note = 1;
+            if (st->prosody_note_counter < 1) {
+                st->prosody_note_counter = 1;
+            } else {
+                st->prosody_note_counter++;
+            }
+            st->prosody_last_anchor_midi =
+                (sm > 0.f) ? (69.f + 12.f * log2f(sm / 440.f)) : 0.f;
+            st->prosody_transition_until = fi + NP_TRANS_HALO_FRAMES;
+            is_trans = (fi <= st->prosody_transition_until);
+            note_id = st->prosody_note_counter;
+        } else {
+            if (sm > 0.f && st->prosody_last_anchor_midi > 0.f) {
+                float midi = 69.f + 12.f * log2f(sm / 440.f);
+                float cents = (midi - st->prosody_last_anchor_midi) * 100.f;
+                if (fabsf(cents) >= NP_CENTS_JUMP_NOTE) {
+                    st->prosody_note_counter++;
+                    st->prosody_last_anchor_midi = midi;
+                    st->prosody_transition_until = fi + NP_TRANS_HALO_FRAMES;
+                } else {
+                    float a = 0.1f;
+                    st->prosody_last_anchor_midi =
+                        st->prosody_last_anchor_midi * (1.f - a) + midi * a;
+                }
+            }
+            is_trans = (fi <= st->prosody_transition_until);
+            note_id = st->prosody_note_counter;
+        }
+    }
+
+    int can_vib = (f0 > 0.f && vad >= NP_VAD_VOICED && !is_trans);
+    if (can_vib) {
+        np_vib_ring_push(st, log2f(f0));
+    } else {
+        np_vib_ring_trim(st);
+    }
+
+    float vr = 0.f, vd = 0.f, vs = 0.f;
+    int va = 0;
+    if (st->prosody_vib_n >= 32) {
+        int n = st->prosody_vib_n;
+        int w = (int)fminf(22.f, floorf(0.35f * (float)n));
+        if (w < 1) w = 1;
+        float ma = 0.f;
+        for (int i = n - w; i < n; i++) ma += st->prosody_vib_log2[i];
+        ma /= (float)w;
+        float det[96];
+        for (int i = 0; i < n; i++) det[i] = st->prosody_vib_log2[i] - ma;
+        np_vibrato_from_detrended(det, n, &vr, &vd, &vs, &va);
+    }
+
+    st->prosody_last_vib_rate = vr;
+    st->prosody_last_vib_depth = vd;
+    st->prosody_last_vib_stability = vs;
+
+    out->prosody_note_id = (float)note_id;
+    out->prosody_is_transition = is_trans ? 1.f : 0.f;
+    out->prosody_vibrato_active = va ? 1.f : 0.f;
+    out->prosody_vibrato_rate_hz = vr;
+    out->prosody_vibrato_depth_cents = vd;
+    out->prosody_vibrato_stability = vs;
+
+    st->prosody_frame_idx++;
+}
+
 /*
  * Allocate and zero-initialize the inference state.
  *
@@ -1140,6 +1393,11 @@ NanoPitchState* nanopitch_create_state(int gru_size) {
         st->viterbi_prev[i] = -10.0f;
     }
 
+    st->prosody_transition_until = -1;
+    st->prosody_ema_db = -42.f;
+    st->prosody_head_seg_nn = 0;
+    st->prosody_head_vib_nn = 0;
+
     return st;
 }
 
@@ -1169,6 +1427,23 @@ void nanopitch_reset_state(NanoPitchState *st, int gru_size) {
         st->viterbi_prev[i] = -10.0f;
     }
     st->last_f0 = 0.0f;
+
+    st->prosody_note_counter = 0;
+    st->prosody_silent_frames = 0;
+    st->prosody_in_note = 0;
+    st->prosody_transition_until = -1;
+    st->prosody_f0_ring_len = 0;
+    memset(st->prosody_f0_ring, 0, sizeof(st->prosody_f0_ring));
+    st->prosody_last_anchor_midi = 0.f;
+    st->prosody_frame_idx = 0;
+    st->prosody_vib_n = 0;
+    st->prosody_ema_db = -42.f;
+    st->prosody_last_vib_rate = 0.f;
+    st->prosody_last_vib_depth = 0.f;
+    st->prosody_last_vib_stability = 0.f;
+    memset(st->prosody_vib_log2, 0, sizeof(st->prosody_vib_log2));
+    st->prosody_head_seg_nn = 0;
+    st->prosody_head_vib_nn = 0;
 }
 
 /*
@@ -1250,6 +1525,7 @@ int nanopitch_process_frame(const NanoPitchWeights *w,
         out->vad = 0.0f;
         memset(out->pitch_posterior, 0, sizeof(out->pitch_posterior));
         out->f0_hz = 0.0f;
+        np_prosody_clear_output(out);
         return 0;
     }
 
@@ -1390,6 +1666,8 @@ int nanopitch_process_frame(const NanoPitchWeights *w,
      * preventing octave jumps and spurious voiced/unvoiced switches.
      */
     viterbi_step(st, out->pitch_posterior, &out->f0_hz);
+
+    np_prosody_step(st, audio_frame, out);
 
     return 1;
 }

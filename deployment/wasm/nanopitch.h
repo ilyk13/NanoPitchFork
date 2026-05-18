@@ -475,6 +475,29 @@ typedef struct {
      * most recently decoded frequency in Hz (0 = unvoiced). */
     float *viterbi_prev;  /* [PITCH_BINS + 1] log probabilities */
     float last_f0;
+
+    /* ---- Prosody / coach metrics (analytic DSP; optional NN head overrides later) ---- */
+    int prosody_note_counter;
+    int prosody_silent_frames;
+    int prosody_in_note;
+    int prosody_transition_until;
+    float prosody_f0_ring[5];
+    int prosody_f0_ring_len;
+    float prosody_last_anchor_midi;
+    int prosody_frame_idx;
+
+    float prosody_vib_log2[96];
+    int prosody_vib_n;
+
+    float prosody_ema_db;
+
+    float prosody_last_vib_rate;
+    float prosody_last_vib_depth;
+    float prosody_last_vib_stability;
+
+    /** 0 = fill segmentation/vibrato from analytic path; 1 = reserved for NN (future). */
+    int prosody_head_seg_nn;
+    int prosody_head_vib_nn;
 } NanoPitchState;
 
 /**
@@ -509,7 +532,35 @@ typedef struct {
      *  network.  Exposed here so a UI can draw a live spectrogram
      *  visualisation alongside the pitch trace without recomputing it. */
     float mel[NC_N_MELS];       /* input log-mel (for visualization) */
+
+    /* --- Prosody (same 100 Hz frame as NN); floats for easy JS/WASM transfer --- */
+    float prosody_note_id;
+    float prosody_is_transition;
+    float prosody_vibrato_active;
+    float prosody_vibrato_rate_hz;
+    float prosody_vibrato_depth_cents;
+    float prosody_vibrato_stability;
+    float prosody_smooth_rms_db;
+    float prosody_mel_tilt;
+    float prosody_raw_rms_db;
 } NanoPitchOutput;
+
+/** Float count: VAD(1) + pitch(360) + f0(1) + mel(40) + prosody(9) — keep JS in sync. */
+#define NC_NP_OUT_FLOATS  (1 + NC_PITCH_BINS + 1 + NC_N_MELS + 9)
+
+/**
+ * ABI: flat WASM output buffer written by nanopitch_process_frame (NC_NP_OUT_FLOATS floats).
+ * Index order matches NanoPitchOutput field order:
+ *   [0]                    vad
+ *   [1 .. NC_PITCH_BINS]   pitch_posterior[0..359]
+ *   [1 + NC_PITCH_BINS]    f0_hz
+ *   [..+40]                mel[0..39]
+ *   [402] prosody_note_id, [403] prosody_is_transition, [404] prosody_vibrato_active,
+ *   [405] prosody_vibrato_rate_hz, [406] prosody_vibrato_depth_cents,
+ *   [407] prosody_vibrato_stability, [408] prosody_smooth_rms_db,
+ *   [409] prosody_mel_tilt, [410] prosody_raw_rms_db
+ * Bump NC_NP_OUT_FLOATS (and web NP_OUT_FLOATS) together if this grows.
+ */
 
 /* =========================================================================
  * Section 4 -- Public API
