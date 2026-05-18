@@ -3,196 +3,229 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NanoPitch — Live Pitch Tracking</title>
-
-<!--
-  ============================================================================
-  NanoPitch: Live Pitch Tracking in the Browser
-  ============================================================================
-
-  This single-page application performs real-time monophonic pitch detection
-  entirely in the browser. It combines several key web technologies:
-
-    1. Web Audio API  - Captures live microphone input as PCM float samples
-    2. WebAssembly     - Runs a neural-network pitch tracker at native speed
-    3. Canvas 2D API   - Draws scrolling spectrograms and waveforms
-    4. Drag-and-Drop   - Lets users load trained model weights from a JSON file
-
-  The signal processing pipeline works as follows:
-    Mic -> AudioContext -> ScriptProcessorNode -> Resample to 16 kHz
-    -> Copy samples into WASM heap -> Call C inference function
-    -> Read results (VAD, mel, pitch posteriorgram, f0) from WASM heap
-    -> Visualize on canvas + update numeric meters
-
-  Key concepts you will see annotated below:
-    - How the browser's AudioContext manages real-time audio
-    - How ScriptProcessorNode gives us raw PCM sample buffers in JS
-    - How sample-rate conversion (resampling) works at the simplest level
-    - How JavaScript and WebAssembly share memory via typed arrays
-    - How 2D spectrograms are drawn pixel-by-pixel into ImageData
-    - How a polynomial approximation creates a viridis-like colormap
-  ============================================================================
--->
+<title>NanoPitch — Live</title>
 
 <style>
-  /* ---- CSS Custom Properties (Design Tokens) ----
-     These define the dark-theme color palette used throughout the UI.
-     The variable names are semantic: --bg for background, --surface for
-     panels, --accent for interactive highlights, etc. */
   :root {
-    --bg: #0f0f14;
-    --surface: #1a1a24;
-    --border: #2a2a3a;
-    --text: #e0e0e8;
-    --dim: #888899;
-    --accent: #6c8cff;
-    --accent2: #ff6c8c;
-    --green: #4cda7c;
+    --bg: #070b14;
+    --bg-elevated: #0c1224;
+    --surface: rgba(28, 32, 58, 0.55);
+    --surface-hover: rgba(40, 44, 78, 0.65);
+    --text: #e8e6f2;
+    --dim: #9a96b8;
+    --accent: #a78bfa;
+    --accent-soft: rgba(167, 139, 250, 0.35);
+    --accent2: #c084fc;
+    --line: rgba(255, 255, 255, 0.06);
+    --glow: 0 8px 32px rgba(8, 6, 24, 0.45);
+    --green: #6ee7b7;
+    --warn: #fbbf24;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-    background: var(--bg); color: var(--text);
-    min-height: 100vh; display: flex; flex-direction: column;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: radial-gradient(120% 80% at 50% 0%, #151032 0%, var(--bg) 55%);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
   }
   header {
-    padding: 1rem 1.5rem; border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+    padding: 1rem 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
   }
-  header h1 { font-size: 1.3rem; font-weight: 600; }
+  header h1 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    background: linear-gradient(135deg, var(--text) 0%, var(--accent) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
   header .status { font-size: 0.85rem; color: var(--dim); }
   header .status.ready { color: var(--green); }
   .controls {
-    padding: 1rem 1.5rem; border-bottom: 1px solid var(--border);
-    display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;
+    margin: 0 1.5rem 0.75rem;
+    padding: 0.85rem 1.1rem;
+    border-radius: 16px;
+    background: var(--surface);
+    backdrop-filter: blur(12px);
+    box-shadow: var(--glow);
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    flex-wrap: wrap;
   }
   button {
-    padding: 0.5rem 1.2rem; border: 1px solid var(--border);
-    border-radius: 6px; background: var(--surface); color: var(--text);
-    cursor: pointer; font-size: 0.9rem; transition: all 0.15s;
+    padding: 0.55rem 1.25rem;
+    border: none;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 0.88rem;
+    font-weight: 500;
+    transition: background 0.15s, transform 0.1s;
   }
-  button:hover { border-color: var(--accent); background: #222233; }
-  button:disabled { opacity: 0.4; cursor: not-allowed; }
-  button.active { border-color: var(--accent2); background: #2a1525; }
+  button:hover {
+    background: var(--surface-hover);
+  }
+  button:disabled { opacity: 0.38; cursor: not-allowed; }
+  button.active {
+    background: var(--accent-soft);
+    color: var(--text);
+    box-shadow: 0 0 0 1px var(--accent) inset;
+  }
   .drop-zone {
-    padding: 0.5rem 1.2rem; border: 2px dashed var(--border);
-    border-radius: 6px; color: var(--dim); font-size: 0.85rem;
-    cursor: pointer; transition: all 0.2s; min-width: 200px; text-align: center;
+    padding: 0.55rem 1.25rem;
+    border-radius: 999px;
+    border: 1px dashed rgba(167, 139, 250, 0.35);
+    color: var(--dim);
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    min-width: 200px;
+    text-align: center;
+    background: rgba(0, 0, 0, 0.15);
   }
-  .drop-zone.dragover { border-color: var(--accent); background: #1a1a30; }
-  .drop-zone.loaded { border-color: var(--green); border-style: solid; color: var(--green); }
+  .drop-zone.dragover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+  .drop-zone.loaded {
+    border-style: solid;
+    border-color: rgba(110, 231, 183, 0.5);
+    color: var(--green);
+  }
   main {
-    flex: 1; padding: 1rem 1.5rem; display: grid;
+    flex: 1;
+    padding: 0 1.5rem 1.5rem;
+    display: grid;
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto 1fr auto;
-    gap: 1rem; min-height: 0;
+    gap: 1.1rem;
+    min-height: 0;
   }
   .panel {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; padding: 0.75rem; overflow: hidden;
+    background: var(--surface);
+    backdrop-filter: blur(14px);
+    border-radius: 18px;
+    padding: 1rem 1.1rem;
+    overflow: hidden;
+    box-shadow: var(--glow);
   }
   .panel h2 {
-    font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em;
-    color: var(--dim); margin-bottom: 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--dim);
+    margin-bottom: 0.65rem;
   }
-  .viz-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .panel .panel-hint {
+    font-size: 0.78rem;
+    color: var(--dim);
+    margin: -0.35rem 0 0.65rem;
+    line-height: 1.35;
+    opacity: 0.9;
+  }
+  .viz-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; }
 
-  /* "image-rendering: pixelated" is crucial for spectrograms -- it tells
-     the browser NOT to smooth/blur pixels when the canvas is scaled up.
-     Without this, the crisp per-pixel spectrogram would look blurry. */
   canvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
   #mel-canvas { height: 120px; }
   #pitch-canvas { height: 120px; }
-  #waveform-canvas { height: 60px; }
+  #waveform-canvas { height: 64px; }
+
   .meters {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-    gap: 0.75rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+    gap: 1rem;
   }
   .meter {
-    text-align: center; padding: 0.5rem;
-    background: var(--bg); border-radius: 6px;
+    text-align: center;
+    padding: 0.85rem 0.5rem;
+    border-radius: 14px;
+    background: rgba(0, 0, 0, 0.2);
+  }
+  .meter.meter-hero .value {
+    font-size: 2rem;
   }
   .meter .value {
-    font-size: 1.8rem; font-weight: 700; font-variant-numeric: tabular-nums;
+    font-size: 1.65rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
   }
-  .meter .label { font-size: 0.75rem; color: var(--dim); margin-top: 0.25rem; }
+  .meter .label { font-size: 0.72rem; color: var(--dim); margin-top: 0.35rem; }
+  .meter .sub {
+    font-size: 0.75rem;
+    color: var(--accent2);
+    margin-top: 0.25rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
   .meter.vad .value { color: var(--green); }
-  .meter.pitch .value { color: var(--accent); }
-  .meter.note .value { color: var(--accent2); }
-  #rtf-canvas { height: 50px; }
-  #rtf-meter .value { color: var(--green); }
-  #rtf-meter.warn .value { color: #ffaa33; }
-  #rtf-meter.over .value { color: var(--accent2); }
-
-  .stage-bar {
-    padding: 0 1.5rem 0.5rem;
-    display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
-  }
-  .stage-bar .tab {
-    padding: 0.35rem 1rem; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--surface); color: var(--dim); cursor: pointer; font-size: 0.85rem;
-  }
-  .stage-bar .tab.active { color: var(--text); border-color: var(--accent); background: #222233; }
-  .stage-bar .tab:disabled { opacity: 0.35; cursor: not-allowed; }
+  .meter.note .value { color: var(--accent); }
 
   .prosody-card {
-    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
-    margin-bottom: 0.5rem; overflow: hidden;
+    background: rgba(0, 0, 0, 0.18);
+    border-radius: 14px;
+    margin-bottom: 0.6rem;
+    overflow: hidden;
   }
   .prosody-card .card-toggle {
-    width: 100%; text-align: left; padding: 0.5rem 0.75rem;
-    background: var(--surface); border: none; color: var(--text);
-    font-size: 0.85rem; font-weight: 600; cursor: pointer;
-    display: flex; justify-content: space-between; align-items: center;
+    width: 100%;
+    text-align: left;
+    padding: 0.65rem 1rem;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
-  .prosody-card .card-toggle::after { content: '▼'; font-size: 0.65rem; color: var(--dim); }
+  .prosody-card .card-toggle::after {
+    content: '▼';
+    font-size: 0.6rem;
+    color: var(--dim);
+  }
   .prosody-card.collapsed .card-toggle::after { content: '▶'; }
   .prosody-card.collapsed .card-body { display: none; }
-  .prosody-card .card-body { padding: 0.5rem 0.75rem; }
-  .prosody-card canvas.strip-canvas { height: 56px; image-rendering: auto; }
-  .chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.5rem; }
+  .prosody-card .card-body { padding: 0.5rem 1rem 1rem; }
+  .prosody-card canvas.strip-canvas,
+  #vib-sine-canvas {
+    height: 72px;
+    width: 100%;
+    border-radius: 10px;
+    image-rendering: auto;
+  }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.55rem; }
   .chip {
-    font-size: 0.72rem; padding: 0.2rem 0.5rem; border-radius: 4px;
-    background: #2a2a40; color: var(--accent); border: 1px solid var(--border);
+    font-size: 0.72rem;
+    padding: 0.28rem 0.65rem;
+    border-radius: 999px;
+    background: rgba(167, 139, 250, 0.12);
+    color: var(--accent2);
   }
-  .chip.warn { color: #ffaa33; border-color: #664422; }
-  .chip.bad { color: var(--accent2); border-color: #663344; }
-
-  #summary-stage {
-    max-width: 720px;
-  }
-  #summary-stage .summary-text {
-    font-size: 0.95rem; line-height: 1.5; margin-bottom: 1rem; color: var(--text);
-  }
-  #summary-stage h3 { font-size: 0.75rem; text-transform: uppercase; color: var(--dim); margin: 0.75rem 0 0.35rem; }
-  #summary-stage ul { margin-left: 1.2rem; font-size: 0.88rem; line-height: 1.45; }
-  #summary-stage li { margin-bottom: 0.25rem; }
-  #summary-stage .fail { color: #ff9e9e; }
-  #summary-stage .ok { color: #8ce1a8; }
-
-  #live-stage.hidden, #summary-stage.hidden { display: none !important; }
+  .chip.warn { color: var(--warn); background: rgba(251, 191, 36, 0.12); }
+  .chip.bad { color: #f9a8d4; background: rgba(249, 168, 212, 0.1); }
 
   @media (max-width: 700px) {
     .viz-row { grid-template-columns: 1fr; }
     header { flex-direction: column; align-items: flex-start; }
-    .controls { flex-direction: column; }
+    .controls { flex-direction: column; align-items: stretch; }
   }
 </style>
 </head>
 <body>
-
-<!-- ======================================================================
-     HTML STRUCTURE
-     ======================================================================
-     The UI has three main regions:
-       1. Header    - App title + status indicator (WASM loaded? model loaded?)
-       2. Controls  - Mic start/stop button, model drop zone, reset button
-       3. Main      - Waveform canvas, mel spectrogram canvas, pitch
-                      posteriorgram canvas, and numeric meters
-
-     The "drop zone" is an interactive area where users can drag-and-drop
-     a JSON file containing the trained NanoPitch neural network weights.
-     ====================================================================== -->
 
 <header>
   <h1>NanoPitch</h1>
@@ -205,121 +238,72 @@
   <button id="btn-reset" disabled>Reset</button>
 </div>
 
-<div class="stage-bar">
-  <button type="button" class="tab active" id="tab-live">Live performance</button>
-  <button type="button" class="tab" id="tab-summary" disabled>Session summary</button>
-</div>
-
 <main id="live-stage">
-  <!-- Waveform display: shows the amplitude envelope of incoming audio.
-       Green background shading indicates voice activity detection (VAD). -->
   <div class="panel">
-    <h2>Waveform &amp; VAD</h2>
+    <h2>Your voice</h2>
+    <p class="panel-hint">Soft green wash when the model hears you singing.</p>
     <canvas id="waveform-canvas"></canvas>
   </div>
 
   <div class="viz-row">
-    <!-- Log-Mel Spectrogram: a time-frequency representation of audio.
-         The neural network computes 40 mel-frequency bands per 10 ms frame.
-         Mel spacing approximates human pitch perception (logarithmic above
-         ~1 kHz). This is the primary input feature for the pitch model. -->
     <div class="panel">
-      <h2>Log-Mel Spectrogram (40 bands)</h2>
+      <h2>Energy over time</h2>
+      <p class="panel-hint">Bright bands are stronger sound; height is pitch register.</p>
       <canvas id="mel-canvas"></canvas>
     </div>
-
-    <!-- Pitch Posteriorgram: the neural network's output distribution over
-         360 pitch bins (one per 20-cent interval across the musical range).
-         Bright regions indicate the model's confidence that a particular
-         pitch is present. The final f0 estimate is decoded from this. -->
     <div class="panel">
-      <h2>Pitch Posteriorgram (360 bins)</h2>
+      <h2>Pitch confidence</h2>
+      <p class="panel-hint">Where the listening model focuses along the vertical scale.</p>
       <canvas id="pitch-canvas"></canvas>
     </div>
   </div>
 
-  <!-- Numeric meters showing instantaneous readings.
-       - Voice Activity: probability (0-100%) that speech/singing is present
-       - Pitch (Hz): the fundamental frequency estimate
-       - Note: the nearest MIDI note name + cents deviation (e.g. A4 +12c)
-       - Level (dB): RMS power of the current frame in decibels -->
   <div class="panel">
     <div class="meters">
       <div class="meter vad">
         <div class="value" id="vad-value">—</div>
-        <div class="label">Voice Activity</div>
+        <div class="label">Voice</div>
       </div>
-      <div class="meter pitch">
-        <div class="value" id="pitch-value">—</div>
-        <div class="label">Pitch (Hz)</div>
-      </div>
-      <div class="meter note">
+      <div class="meter note meter-hero">
         <div class="value" id="note-value">—</div>
-        <div class="label">Note</div>
+        <div class="label">Your pitch</div>
+        <div class="sub" id="pitch-hz-sub"></div>
       </div>
       <div class="meter">
         <div class="value" id="rms-value">—</div>
-        <div class="label">Level (dB)</div>
-      </div>
-      <div class="meter" id="rtf-meter">
-        <div class="value" id="rtf-value">—</div>
-        <div class="label">RTF</div>
+        <div class="label">Loudness (dB)</div>
       </div>
     </div>
   </div>
 
   <div class="panel">
-    <h2>Real-Time Factor (RTF) — inference time / audio time. Must be &lt; 1.0 for real-time.</h2>
-    <canvas id="rtf-canvas"></canvas>
-  </div>
-
-  <div class="panel">
-    <h2>Prosody (DSP on NN output)</h2>
-    <p style="font-size: 0.78rem; color: var(--dim); margin-bottom: 0.5rem;">
-      Vibrato, loudness, and breathiness (mel tilt) metrics drive the chips below. Note boundaries use DSP rules until a model head replaces them.
-    </p>
+    <h2>Style &amp; tone</h2>
 
     <div class="prosody-card" id="card-vibrato">
-      <button type="button" class="card-toggle" aria-expanded="true">Vibrato depth (cents)</button>
+      <button type="button" class="card-toggle" aria-expanded="true">Vibrato</button>
       <div class="card-body">
-        <canvas class="strip-canvas" id="vib-canvas" width="600" height="56"></canvas>
+        <canvas id="vib-sine-canvas" width="600" height="144"></canvas>
         <div class="chips" id="vib-chips"></div>
       </div>
     </div>
     <div class="prosody-card" id="card-loudness">
-      <button type="button" class="card-toggle" aria-expanded="true">Loudness (smoothed dB)</button>
+      <button type="button" class="card-toggle" aria-expanded="true">Loudness over time</button>
       <div class="card-body">
         <canvas class="strip-canvas" id="loud-canvas" width="600" height="56"></canvas>
         <div class="chips" id="loud-chips"></div>
       </div>
     </div>
     <div class="prosody-card" id="card-breath">
-      <button type="button" class="card-toggle" aria-expanded="true">Breathiness proxy (mel spectral tilt)</button>
+      <button type="button" class="card-toggle" aria-expanded="true">Breathiness (dB)</button>
       <div class="card-body">
         <canvas class="strip-canvas" id="tilt-canvas" width="600" height="56"></canvas>
         <div class="chips" id="breath-chips"></div>
       </div>
     </div>
-    <div class="prosody-card" id="card-live-fb">
-      <button type="button" class="card-toggle" aria-expanded="true">Live feedback</button>
-      <div class="card-body">
-        <div class="chips" id="live-feedback-chips"></div>
-      </div>
-    </div>
   </div>
 </main>
 
-<section class="panel hidden" id="summary-stage" style="margin: 0 1.5rem 1.5rem;">
-  <h2>Session summary</h2>
-  <p class="summary-text" id="summary-text">Stop the microphone to generate a summary.</p>
-  <h3>What went well</h3>
-  <ul class="ok" id="summary-success"></ul>
-  <h3>Focus next time</h3>
-  <ul class="fail" id="summary-fail"></ul>
-</section>
-
 <script src="prosody.js"></script>
-<script src="feedback.js"></script>
 
 <script>
 // ============================================================================
@@ -371,36 +355,12 @@ function hzToNote(hz) {
 }
 
 
-// ── Viridis Colormap Approximation ──────────────────────────────────────────
-//
-// WHAT IS A COLORMAP?
-//   A colormap maps a scalar value (0.0 to 1.0) to an RGB color.
-//   Scientific visualizations use colormaps to display 2D data (like
-//   spectrograms) where the value at each pixel encodes magnitude.
-//
-// WHY VIRIDIS?
-//   Viridis is a perceptually uniform colormap designed by scientists at
-//   matplotlib. "Perceptually uniform" means equal steps in data value
-//   produce equal steps in perceived brightness/color change -- unlike
-//   rainbow colormaps, which have misleading bright/dark bands. Viridis
-//   also works for colorblind viewers and prints well in grayscale.
-//
-// HOW THIS APPROXIMATION WORKS:
-//   The true viridis colormap is defined by a 256-entry lookup table.
-//   Here, each R/G/B channel is approximated by a cubic polynomial in t:
-//     channel(t) = a + b*t + c*t^2 + d*t^3
-//   The coefficients were fit to match the real viridis curve. The result
-//   goes from dark purple (t=0) through teal (t=0.5) to yellow (t=1.0).
-//   This saves us from shipping a 768-byte lookup table and is "close enough"
-//   for real-time visualization purposes.
-// ─────────────────────────────────────────────────────────────────────────────
-function viridis(t) {
-  // Clamp input to [0, 1]
+// Colormap for spectrograms: blue–purple–magenta heat on dark background.
+function spectrumHeat(t) {
   t = Math.max(0, Math.min(1, t));
-  // Evaluate cubic polynomials for each channel, clamp to [0,1], scale to [0,255]
-  const r = Math.round(255 * Math.max(0, Math.min(1, -0.7 + 4.4*t - 4.1*t*t + 1.4*t*t*t)));
-  const g = Math.round(255 * Math.max(0, Math.min(1, -0.1 + 1.2*t + 0.5*t*t - 1.0*t*t*t)));
-  const b = Math.round(255 * Math.max(0, Math.min(1, 0.3 + 1.5*t - 3.2*t*t + 2.0*t*t*t)));
+  const r = Math.round(255 * Math.max(0, Math.min(1, 0.12 + 0.45 * t + 0.55 * t * t * t)));
+  const g = Math.round(255 * Math.max(0, Math.min(1, 0.04 + 0.28 * t * t - 0.12 * t * t * t)));
+  const b = Math.round(255 * Math.max(0, Math.min(1, 0.22 + 0.65 * t - 0.35 * t * t)));
   return [r, g, b];
 }
 
@@ -458,7 +418,6 @@ let isRunning = false;
 // ─────────────────────────────────────────────────────────────────────────────
 const HISTORY = 300; // frames to show
 let melHistory = [];     // each: Float32Array(40)
-let rtfHistory = [];     // rolling RTF values for sparkline
 let pitchHistory = [];   // each: Float32Array(360)
 let waveHistory = [];    // raw audio chunks
 let vadHistory = [];
@@ -506,7 +465,7 @@ function setupCanvas(id, w, h) {
 //   at the bottom, matching the convention in audio analysis.
 //
 //   The normalization "(value + 12) / 17" maps the typical log-mel energy
-//   range of roughly [-12, +5] to [0, 1] for the viridis colormap.
+//   range of roughly [-12, +5] to [0, 1] for the heat colormap.
 // ─────────────────────────────────────────────────────────────────────────────
 function drawMel(melHist) {
   const { canvas, ctx } = setupCanvas('mel-canvas', HISTORY, 40);
@@ -519,7 +478,7 @@ function drawMel(melHist) {
       // Normalize log-mel energy to [0, 1]. Typical values range ~[-12, +5].
       // (39 - b) flips the axis so low frequencies are at the bottom.
       const val = (frame[39 - b] + 12) / 17;
-      const [r, g, bl] = viridis(val);
+      const [r, g, bl] = spectrumHeat(val);
       // Compute the byte offset into the RGBA pixel array
       const idx = (b * HISTORY + t) * 4;
       img.data[idx] = r; img.data[idx+1] = g;
@@ -542,7 +501,7 @@ function drawMel(melHist) {
 // data bins are mapped onto 120 display rows via nearest-neighbor
 // sampling (Math.floor(row * N_SHOW / 120)).
 //
-// The "*2" in "viridis(val * 2)" amplifies the contrast -- posteriorgram
+// The "*2" in "spectrumHeat(val * 2)" amplifies the contrast -- heat-map
 // values are probabilities that often peak well below 1.0, so doubling
 // them before color mapping makes the peaks more visible.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -561,7 +520,7 @@ function drawPitch(pitchHist) {
       // Flip vertically so low pitches are at the bottom
       const val = frame[BIN_END - 1 - (bin - BIN_START)];
       // Multiply by 2 for contrast enhancement before colormap lookup
-      const [r, g, bl] = viridis(val * 2);
+      const [r, g, bl] = spectrumHeat(val * 2);
       const idx = (row * HISTORY + t) * 4;
       img.data[idx] = r; img.data[idx+1] = g;
       img.data[idx+2] = bl; img.data[idx+3] = 255;
@@ -593,21 +552,20 @@ function drawWaveform(waveHist, vadHist) {
   // Each frame gets 4 horizontal pixels for better visual resolution
   const { canvas, ctx } = setupCanvas('waveform-canvas', HISTORY * 4, 60);
   // Clear to background color
-  ctx.fillStyle = '#0f0f14';
+  ctx.fillStyle = '#070b14';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Layer 1: Draw VAD background shading
+  // Layer 1: soft wash when voice probability is high
   for (let t = 0; t < HISTORY; t++) {
     const vad = vadHist[t] || 0;
     if (vad > 0.3) {
-      // Semi-transparent green; more opaque = higher VAD confidence
-      ctx.fillStyle = `rgba(76, 218, 124, ${vad * 0.15})`;
+      ctx.fillStyle = `rgba(110, 231, 183, ${vad * 0.12})`;
       ctx.fillRect(t * 4, 0, 4, canvas.height);
     }
   }
 
-  // Layer 2: Draw waveform amplitude envelope
-  ctx.strokeStyle = '#6c8cff';
+  // Layer 2: waveform envelope
+  ctx.strokeStyle = '#a78bfa';
   ctx.lineWidth = 1;
   ctx.beginPath();
   const mid = canvas.height / 2;
@@ -632,120 +590,80 @@ function drawWaveform(waveHist, vadHist) {
 }
 
 
-// ── Meter Display Update ────────────────────────────────────────────────────
-//
-// Updates the four numeric readout panels:
-//
-//   VAD (Voice Activity Detection):
-//     Shows the probability (0-100%) that the current frame contains
-//     voiced speech or singing. The neural network outputs this as a
-//     single float in [0, 1]. Values below 1% display as "---" (silence).
-//
-//   Pitch (Hz):
-//     The estimated fundamental frequency (f0) in Hertz. This is decoded
-//     from the pitch posteriorgram, typically via weighted average or
-//     argmax of the 360-bin distribution. Shows "---" when no pitch is detected.
-//
-//   Note:
-//     The nearest musical note name plus cents deviation, computed by
-//     the hzToNote() function above. E.g., "A4 +5c" means 5 cents
-//     sharp of concert A (440 Hz).
-//
-//   Level (dB):
-//     RMS (root-mean-square) power in decibels, computed from the raw
-//     PCM samples: dB = 10 * log10(mean of squared samples).
-//     Values below -80 dB are treated as silence.
-// ─────────────────────────────────────────────────────────────────────────────
 function updateMeters(output) {
   document.getElementById('vad-value').textContent =
     output.vad > 0.01 ? (output.vad * 100).toFixed(0) + '%' : '—';
-  document.getElementById('pitch-value').textContent =
-    output.f0 > 0 ? output.f0.toFixed(1) : '—';
   document.getElementById('note-value').textContent = hzToNote(output.f0);
+  const sub = document.getElementById('pitch-hz-sub');
+  if (sub) {
+    sub.textContent = output.f0 > 0 ? `${output.f0.toFixed(1)} Hz` : '';
+  }
   document.getElementById('rms-value').textContent =
     output.rmsDb > -80 ? output.rmsDb.toFixed(0) : '—';
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Real-Time Factor (RTF) visualization
-//
-// RTF = inference_time / audio_time.
-//   RTF < 1.0 → model runs faster than real-time (good)
-//   RTF = 1.0 → barely keeping up
-//   RTF > 1.0 → too slow, frames will be dropped
-//
-// Each audio frame is 10ms. If inference takes 3ms, RTF = 0.3.
-// The sparkline shows RTF over time so you can see how model size
-// affects real-time performance.
-// ─────────────────────────────────────────────────────────────────────────────
+const lastVibratoDraw = {
+  active: false,
+  rateHz: 5,
+  depthCents: 0,
+  stability: 0,
+};
+let vibSineRaf = null;
 
-function drawRtf(rtfHist) {
-  const canvas = document.getElementById('rtf-canvas');
+function drawVibratoSine(timeSec) {
+  const canvas = document.getElementById('vib-sine-canvas');
+  if (!canvas) return;
   const W = HISTORY * 2;
-  const H = 50;
+  const H = 72;
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext('2d');
-
-  ctx.fillStyle = '#0f0f14';
+  ctx.fillStyle = '#070b14';
   ctx.fillRect(0, 0, W, H);
 
-  // Draw RTF = 1.0 threshold line (the "real-time" boundary)
-  const yThresh = H - (1.0 / 2.0) * H;  // scale: 0-2.0 maps to canvas
-  ctx.strokeStyle = '#553333';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4, 4]);
+  const mid = H / 2;
+  const v = lastVibratoDraw;
+  const rate = v.active && v.rateHz > 0.5 ? v.rateHz : 0;
+  const depth = v.depthCents;
+  const ampPx = v.active
+    ? Math.min(mid - 6, 8 + (Math.min(Math.max(depth, 0), 120) / 120) * (mid - 14))
+    : 2;
+  const omega = rate > 0 ? 2 * Math.PI * rate : 0;
+
+  ctx.strokeStyle = v.active ? '#c084fc' : 'rgba(192, 132, 252, 0.35)';
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
   ctx.beginPath();
-  ctx.moveTo(0, yThresh);
-  ctx.lineTo(W, yThresh);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // Label
-  ctx.fillStyle = '#666';
-  ctx.font = '10px monospace';
-  ctx.fillText('RTF=1.0', 4, yThresh - 3);
-
-  if (rtfHist.length < 2) return;
-
-  // Draw RTF sparkline
-  ctx.beginPath();
-  for (let i = 0; i < rtfHist.length; i++) {
-    const x = (i / HISTORY) * W;
-    const rtf = Math.min(rtfHist[i], 2.0);  // clamp display at 2.0
-    const y = H - (rtf / 2.0) * H;
-
-    // Color: green if < 0.5, yellow if 0.5-1.0, red if > 1.0
-    if (i > 0) ctx.stroke();
-    ctx.beginPath();
-    ctx.strokeStyle = rtf < 0.5 ? '#4cda7c' : rtf < 1.0 ? '#ffaa33' : '#ff6c8c';
-    ctx.lineWidth = 1.5;
+  const steps = Math.min(480, Math.max(64, W));
+  for (let i = 0; i <= steps; i++) {
+    const x = (i / steps) * W;
+    const y =
+      omega > 0
+        ? mid + ampPx * Math.sin(omega * timeSec + (x / W) * Math.PI * 2)
+        : mid + ampPx * Math.sin((x / W) * Math.PI * 4) * 0.2;
     if (i === 0) ctx.moveTo(x, y);
-    else { ctx.moveTo((((i-1) / HISTORY) * W), H - (Math.min(rtfHist[i-1], 2.0) / 2.0) * H); ctx.lineTo(x, y); }
+    else ctx.lineTo(x, y);
   }
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, mid);
+  ctx.lineTo(W, mid);
   ctx.stroke();
 }
 
-function updateRtfMeter(rtfHist) {
-  if (rtfHist.length < 10) return;
-  // Average over last 30 frames (~300ms)
-  const recent = rtfHist.slice(-30);
-  const avg = recent.reduce((a, b) => a + b, 0) / recent.length;
-  const el = document.getElementById('rtf-value');
-  const meter = document.getElementById('rtf-meter');
-  el.textContent = avg.toFixed(2);
-
-  // Color code: green < 0.5, yellow 0.5-1.0, red > 1.0
-  meter.className = 'meter' + (avg < 0.5 ? '' : avg < 1.0 ? ' warn' : ' over');
-
-  // Also update status bar if too slow
-  if (avg > 1.0) {
-    const status = document.getElementById('status');
-    status.textContent = 'Model too slow for real-time! Try a smaller --gru-size.';
-    status.className = 'status';
-  }
+function vibratoSineLoop(tMs) {
+  vibSineRaf = requestAnimationFrame(vibratoSineLoop);
+  drawVibratoSine(tMs * 0.001);
 }
 
+function startVibratoSineLoop() {
+  if (vibSineRaf == null) {
+    vibSineRaf = requestAnimationFrame(vibratoSineLoop);
+  }
+}
 
 function drawProsodyStrip(canvasId, series, strokeStyle) {
   const canvas = document.getElementById(canvasId);
@@ -755,7 +673,7 @@ function drawProsodyStrip(canvasId, series, strokeStyle) {
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#0f0f14';
+  ctx.fillStyle = '#070b14';
   ctx.fillRect(0, 0, W, H);
   const slice = series.slice(-HISTORY);
   if (slice.length < 2) return;
@@ -770,7 +688,7 @@ function drawProsodyStrip(canvasId, series, strokeStyle) {
     mn -= 1;
     mx += 1;
   }
-  ctx.strokeStyle = strokeStyle || '#6c8cff';
+  ctx.strokeStyle = strokeStyle || '#a78bfa';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   for (let i = 0; i < slice.length; i++) {
@@ -799,78 +717,38 @@ function setTextChips(containerId, parts) {
 
 function updateProsodyVisuals(eng, live) {
   if (!eng || !live) return;
-  drawProsodyStrip('vib-canvas', eng.vibDepthHistory, '#ff6c8c');
-  drawProsodyStrip('loud-canvas', eng.loudnessHistory, '#6c8cff');
-  drawProsodyStrip('tilt-canvas', eng.tiltHistory, '#4cda7c');
-
   const v = live.vibrato;
+  lastVibratoDraw.active = !!v.active;
+  lastVibratoDraw.rateHz = v.rateHz;
+  lastVibratoDraw.depthCents = v.depthCents;
+  lastVibratoDraw.stability = v.stability;
+
+  drawProsodyStrip('loud-canvas', eng.loudnessHistory, '#a78bfa');
+  drawProsodyStrip('tilt-canvas', eng.breathDbHistory, '#6ee7b7');
+
+  const bDb = live.breathinessDb != null ? live.breathinessDb : 0;
   setTextChips('vib-chips', [
-    v.active ? 'Vibrato active' : 'No vibrato lock',
-    v.active ? `Rate ${v.rateHz.toFixed(1)} Hz` : `Depth ${v.depthCents.toFixed(0)} ¢`,
-    `Stability ${v.stability.toFixed(2)}`,
+    v.active ? 'Oscillation detected' : 'Mostly steady',
+    v.active
+      ? `${v.depthCents.toFixed(0)} ¢ wide`
+      : `${v.depthCents.toFixed(0)} ¢ movement`,
+    v.active
+      ? `about ${v.rateHz.toFixed(1)} cycles per second`
+      : null,
+    v.active
+      ? `steadiness ${Math.round(Math.min(1, Math.max(0, v.stability)) * 100)}%`
+      : null,
   ]);
 
   setTextChips('loud-chips', [
-    `${live.smoothDb.toFixed(1)} dB smoothed`,
-    live.flags.loudWobble ? 'Dynamics uneven (local)' : 'Dynamics steady (local)',
+    `${live.smoothDb.toFixed(1)} dB`,
+    live.flags.loudWobble ? 'Volume shifting a lot' : 'Volume fairly even',
   ]);
 
   setTextChips('breath-chips', [
-    `Tilt ${live.tilt.toFixed(3)}`,
-    live.flags.breathRising ? 'Breathiness rising (local)' : 'Breathiness flat (local)',
+    `${bDb.toFixed(2)} dB high–low balance`,
+    live.flags.breathRising ? 'More air in the sound lately' : 'Air in the sound holding steady',
   ]);
-
-  if (typeof NPFeedback === 'undefined') return;
-  const chips = NPFeedback.feedbackLiveChips(live);
-  const liveEl = document.getElementById('live-feedback-chips');
-  if (!liveEl) return;
-  liveEl.innerHTML = '';
-  for (let i = 0; i < chips.length; i++) {
-    const c = chips[i];
-    const sp = document.createElement('span');
-    let cls = 'chip';
-    if (/unstable|uneven|rising|Little vibrato/i.test(c)) cls += ' warn';
-    if (/Transition/i.test(c)) cls += ' warn';
-    sp.className = cls;
-    sp.textContent = c;
-    liveEl.appendChild(sp);
-  }
-}
-
-function fillSummary(fb) {
-  document.getElementById('summary-text').textContent = fb.summary;
-  const su = document.getElementById('summary-success');
-  const fa = document.getElementById('summary-fail');
-  su.innerHTML = '';
-  fa.innerHTML = '';
-  for (let i = 0; i < fb.successes.length; i++) {
-    const li = document.createElement('li');
-    li.textContent = fb.successes[i];
-    su.appendChild(li);
-  }
-  for (let i = 0; i < fb.failures.length; i++) {
-    const li = document.createElement('li');
-    li.textContent = fb.failures[i];
-    fa.appendChild(li);
-  }
-}
-
-function switchStage(which) {
-  const live = document.getElementById('live-stage');
-  const sum = document.getElementById('summary-stage');
-  const tLive = document.getElementById('tab-live');
-  const tSum = document.getElementById('tab-summary');
-  if (which === 'summary') {
-    live.classList.add('hidden');
-    sum.classList.remove('hidden');
-    tLive.classList.remove('active');
-    tSum.classList.add('active');
-  } else {
-    live.classList.remove('hidden');
-    sum.classList.add('hidden');
-    tLive.classList.add('active');
-    tSum.classList.remove('active');
-  }
 }
 
 function setupProsodyUI() {
@@ -880,11 +758,6 @@ function setupProsodyUI() {
       card.classList.toggle('collapsed');
       btn.setAttribute('aria-expanded', String(!card.classList.contains('collapsed')));
     });
-  });
-  document.getElementById('tab-live').addEventListener('click', () => switchStage('live'));
-  document.getElementById('tab-summary').addEventListener('click', () => {
-    const t = document.getElementById('tab-summary');
-    if (!t.disabled) switchStage('summary');
   });
 }
 
@@ -1078,9 +951,6 @@ async function startMic() {
   if (isRunning) { stopMic(); return; }
 
   if (prosodyEng) NPProsody.prosodyReset(prosodyEng);
-  switchStage('live');
-  const tabSum = document.getElementById('tab-summary');
-  if (tabSum) tabSum.disabled = true;
 
   // Create an AudioContext. We request 16 kHz but the browser may
   // give us a different rate (e.g., 44100 or 48000).
@@ -1130,16 +1000,10 @@ async function startMic() {
     while (resampleBuf.length >= FRAME_SIZE) {
       const samples = resampleBuf.subarray(0, FRAME_SIZE);
 
-      const t0 = performance.now();
       const result = processAudioFrame(samples);
-      const inferMs = performance.now() - t0;
-      const rtf = inferMs / 10.0;
 
       let snap = null;
       if (prosodyEng) snap = NPProsody.prosodyAppendFrame(prosodyEng, result);
-
-      rtfHistory.push(rtf);
-      while (rtfHistory.length > HISTORY) rtfHistory.shift();
 
       if (result) {
         melHistory.push(result.mel);
@@ -1162,9 +1026,7 @@ async function startMic() {
         drawMel(melHistory);
         drawPitch(pitchHistory);
         drawWaveform(waveHistory, vadHistory);
-        drawRtf(rtfHistory);
         if (result) updateMeters(result);
-        updateRtfMeter(rtfHistory);
         if (prosodyEng && snap && typeof NPProsody !== 'undefined') {
           const live = NPProsody.prosodyLiveMetricsFromSnapshot(snap, prosodyEng);
           updateProsodyVisuals(prosodyEng, live);
@@ -1195,25 +1057,6 @@ async function startMic() {
 // everything was fully initialized.
 // ─────────────────────────────────────────────────────────────────────────────
 function stopMic() {
-  if (prosodyEng && typeof NPFeedback !== 'undefined') {
-    const tabSum = document.getElementById('tab-summary');
-    if (prosodyEng.frameIndex > 5) {
-      const post = NPProsody.prosodyRunPostPass(prosodyEng);
-      const fb = NPFeedback.feedbackPostProcess(post, prosodyEng.frameIndex);
-      fillSummary(fb);
-      if (tabSum) tabSum.disabled = false;
-      switchStage('summary');
-    } else if (prosodyEng.frameIndex > 0) {
-      fillSummary({
-        summary: 'That clip was very short. Try several seconds of singing for a richer summary.',
-        successes: [],
-        failures: [],
-      });
-      if (tabSum) tabSum.disabled = false;
-      switchStage('summary');
-    }
-  }
-
   if (processorNode) { processorNode.disconnect(); processorNode = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
@@ -1425,6 +1268,7 @@ function setStatus(text, ready) {
 
 async function init() {
   setupProsodyUI();
+  startVibratoSineLoop();
   // Set up the drag-and-drop / click-to-browse model loading
   setupDragDrop();
 

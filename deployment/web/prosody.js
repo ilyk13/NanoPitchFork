@@ -23,6 +23,20 @@
     return arr.reduce((a, b) => a + b, 0) / arr.length;
   }
 
+  /** High vs low mel-band mean (log-energy); difference reads ~dB of spectral tilt. */
+  function melHighLowDiffDb(mel) {
+    if (!mel || mel.length < 9) return 0;
+    const n = mel.length;
+    const third = Math.max(1, Math.floor(n / 3));
+    let low = 0;
+    let high = 0;
+    for (let i = 0; i < third; i++) low += mel[i];
+    for (let i = n - third; i < n; i++) high += mel[i];
+    low /= third;
+    high /= third;
+    return high - low;
+  }
+
   function createProsodyEngine() {
     return {
       frameIndex: 0,
@@ -37,6 +51,7 @@
       vibDepthHistory: [],
       loudnessHistory: [],
       tiltHistory: [],
+      breathDbHistory: [],
       vibratoRateSamples: [],
       lastVibrato: {
         active: false,
@@ -60,6 +75,7 @@
     eng.vibDepthHistory.length = 0;
     eng.loudnessHistory.length = 0;
     eng.tiltHistory.length = 0;
+    eng.breathDbHistory.length = 0;
     eng.vibratoRateSamples.length = 0;
     eng.lastVibrato = {
       active: false,
@@ -92,6 +108,7 @@
         vibrato: { active: false, rateHz: 0, depthCents: 0, stability: 0 },
         smoothDb: 0,
         tilt: 0,
+        breathinessDb: 0,
         f0: 0,
         vad: 0,
         rmsDb: -100,
@@ -117,6 +134,7 @@
       eng.isTransition.push(!!result.prosodyIsTransition);
       eng.smoothDb.push(result.prosodySmoothRmsDb);
       eng.melTilt.push(result.prosodyMelTilt);
+      const breathDb = melHighLowDiffDb(result.mel);
 
       snap = {
         frameIndex: fi,
@@ -125,6 +143,7 @@
         vibrato: Object.assign({}, vib),
         smoothDb: result.prosodySmoothRmsDb,
         tilt: result.prosodyMelTilt,
+        breathinessDb: breathDb,
         f0: result.f0,
         vad: result.vad,
         rmsDb: result.rmsDb,
@@ -141,6 +160,10 @@
     while (eng.loudnessHistory.length > VIZ) eng.loudnessHistory.shift();
     eng.tiltHistory.push(eng.melTilt.length ? eng.melTilt[eng.melTilt.length - 1] : 0);
     while (eng.tiltHistory.length > VIZ) eng.tiltHistory.shift();
+    eng.breathDbHistory.push(
+      snap.breathinessDb != null ? snap.breathinessDb : 0
+    );
+    while (eng.breathDbHistory.length > VIZ) eng.breathDbHistory.shift();
 
     return snap;
   }
@@ -222,8 +245,9 @@
       stdDev(eng.vibratoRateSamples.slice(-12)) > 0.55;
 
     const breathRising =
-      eng.tiltHistory.length >= 25 &&
-      mean(eng.tiltHistory.slice(-25)) - mean(eng.tiltHistory.slice(-50, -25)) > 0.12;
+      eng.breathDbHistory.length >= 25 &&
+      mean(eng.breathDbHistory.slice(-25)) - mean(eng.breathDbHistory.slice(-50, -25)) >
+        0.45;
 
     const loudWobble =
       eng.loudnessHistory.length >= 30 &&
@@ -233,6 +257,9 @@
       vibrato: snap.vibrato,
       smoothDb: snap.smoothDb,
       tilt: snap.tilt,
+      breathinessDb: snap.breathinessDb != null ? snap.breathinessDb : melHighLowDiffDb(
+        eng.mel.length ? eng.mel[eng.mel.length - 1] : null
+      ),
       noteId: snap.noteId,
       isTransition: snap.isTransition,
       f0: snap.f0,
@@ -249,5 +276,6 @@
     prosodyAppendFrame,
     prosodyRunPostPass,
     prosodyLiveMetricsFromSnapshot,
+    melHighLowDiffDb,
   };
 })(typeof window !== 'undefined' ? window : globalThis);
