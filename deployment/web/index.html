@@ -124,6 +124,54 @@
   #rtf-meter.warn .value { color: #ffaa33; }
   #rtf-meter.over .value { color: var(--accent2); }
 
+  .stage-bar {
+    padding: 0 1.5rem 0.5rem;
+    display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+  }
+  .stage-bar .tab {
+    padding: 0.35rem 1rem; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--dim); cursor: pointer; font-size: 0.85rem;
+  }
+  .stage-bar .tab.active { color: var(--text); border-color: var(--accent); background: #222233; }
+  .stage-bar .tab:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  .prosody-card {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 0.5rem; overflow: hidden;
+  }
+  .prosody-card .card-toggle {
+    width: 100%; text-align: left; padding: 0.5rem 0.75rem;
+    background: var(--surface); border: none; color: var(--text);
+    font-size: 0.85rem; font-weight: 600; cursor: pointer;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .prosody-card .card-toggle::after { content: '▼'; font-size: 0.65rem; color: var(--dim); }
+  .prosody-card.collapsed .card-toggle::after { content: '▶'; }
+  .prosody-card.collapsed .card-body { display: none; }
+  .prosody-card .card-body { padding: 0.5rem 0.75rem; }
+  .prosody-card canvas.strip-canvas { height: 56px; image-rendering: auto; }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.5rem; }
+  .chip {
+    font-size: 0.72rem; padding: 0.2rem 0.5rem; border-radius: 4px;
+    background: #2a2a40; color: var(--accent); border: 1px solid var(--border);
+  }
+  .chip.warn { color: #ffaa33; border-color: #664422; }
+  .chip.bad { color: var(--accent2); border-color: #663344; }
+
+  #summary-stage {
+    max-width: 720px;
+  }
+  #summary-stage .summary-text {
+    font-size: 0.95rem; line-height: 1.5; margin-bottom: 1rem; color: var(--text);
+  }
+  #summary-stage h3 { font-size: 0.75rem; text-transform: uppercase; color: var(--dim); margin: 0.75rem 0 0.35rem; }
+  #summary-stage ul { margin-left: 1.2rem; font-size: 0.88rem; line-height: 1.45; }
+  #summary-stage li { margin-bottom: 0.25rem; }
+  #summary-stage .fail { color: #ff9e9e; }
+  #summary-stage .ok { color: #8ce1a8; }
+
+  #live-stage.hidden, #summary-stage.hidden { display: none !important; }
+
   @media (max-width: 700px) {
     .viz-row { grid-template-columns: 1fr; }
     header { flex-direction: column; align-items: flex-start; }
@@ -157,7 +205,12 @@
   <button id="btn-reset" disabled>Reset</button>
 </div>
 
-<main>
+<div class="stage-bar">
+  <button type="button" class="tab active" id="tab-live">Live performance</button>
+  <button type="button" class="tab" id="tab-summary" disabled>Session summary</button>
+</div>
+
+<main id="live-stage">
   <!-- Waveform display: shows the amplitude envelope of incoming audio.
        Green background shading indicates voice activity detection (VAD). -->
   <div class="panel">
@@ -219,7 +272,54 @@
     <h2>Real-Time Factor (RTF) — inference time / audio time. Must be &lt; 1.0 for real-time.</h2>
     <canvas id="rtf-canvas"></canvas>
   </div>
+
+  <div class="panel">
+    <h2>Prosody (DSP on NN output)</h2>
+    <p style="font-size: 0.78rem; color: var(--dim); margin-bottom: 0.5rem;">
+      Vibrato, loudness, and breathiness (mel tilt) metrics drive the chips below. Note boundaries use DSP rules until a model head replaces them.
+    </p>
+
+    <div class="prosody-card" id="card-vibrato">
+      <button type="button" class="card-toggle" aria-expanded="true">Vibrato depth (cents)</button>
+      <div class="card-body">
+        <canvas class="strip-canvas" id="vib-canvas" width="600" height="56"></canvas>
+        <div class="chips" id="vib-chips"></div>
+      </div>
+    </div>
+    <div class="prosody-card" id="card-loudness">
+      <button type="button" class="card-toggle" aria-expanded="true">Loudness (smoothed dB)</button>
+      <div class="card-body">
+        <canvas class="strip-canvas" id="loud-canvas" width="600" height="56"></canvas>
+        <div class="chips" id="loud-chips"></div>
+      </div>
+    </div>
+    <div class="prosody-card" id="card-breath">
+      <button type="button" class="card-toggle" aria-expanded="true">Breathiness proxy (mel spectral tilt)</button>
+      <div class="card-body">
+        <canvas class="strip-canvas" id="tilt-canvas" width="600" height="56"></canvas>
+        <div class="chips" id="breath-chips"></div>
+      </div>
+    </div>
+    <div class="prosody-card" id="card-live-fb">
+      <button type="button" class="card-toggle" aria-expanded="true">Live feedback</button>
+      <div class="card-body">
+        <div class="chips" id="live-feedback-chips"></div>
+      </div>
+    </div>
+  </div>
 </main>
+
+<section class="panel hidden" id="summary-stage" style="margin: 0 1.5rem 1.5rem;">
+  <h2>Session summary</h2>
+  <p class="summary-text" id="summary-text">Stop the microphone to generate a summary.</p>
+  <h3>What went well</h3>
+  <ul class="ok" id="summary-success"></ul>
+  <h3>Focus next time</h3>
+  <ul class="fail" id="summary-fail"></ul>
+</section>
+
+<script src="prosody.js"></script>
+<script src="feedback.js"></script>
 
 <script>
 // ============================================================================
@@ -362,6 +462,9 @@ let rtfHistory = [];     // rolling RTF values for sparkline
 let pitchHistory = [];   // each: Float32Array(360)
 let waveHistory = [];    // raw audio chunks
 let vadHistory = [];
+
+/** Full-session prosody + DSP (optional if scripts missing). */
+const prosodyEng = typeof NPProsody !== 'undefined' ? NPProsody.createProsodyEngine() : null;
 
 
 // ── Canvas Setup Helper ─────────────────────────────────────────────────────
@@ -644,6 +747,147 @@ function updateRtfMeter(rtfHist) {
 }
 
 
+function drawProsodyStrip(canvasId, series, strokeStyle) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const W = HISTORY * 2;
+  const H = 56;
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0f0f14';
+  ctx.fillRect(0, 0, W, H);
+  const slice = series.slice(-HISTORY);
+  if (slice.length < 2) return;
+  let mn = Infinity;
+  let mx = -Infinity;
+  for (let i = 0; i < slice.length; i++) {
+    const v = slice[i];
+    if (v < mn) mn = v;
+    if (v > mx) mx = v;
+  }
+  if (Math.abs(mx - mn) < 1e-8) {
+    mn -= 1;
+    mx += 1;
+  }
+  ctx.strokeStyle = strokeStyle || '#6c8cff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < slice.length; i++) {
+    const x = (i / Math.max(1, slice.length - 1)) * W;
+    const t = (slice[i] - mn) / (mx - mn);
+    const y = H - 4 - t * (H - 8);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function setTextChips(containerId, parts) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = '';
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (p == null || p === '') continue;
+    const s = document.createElement('span');
+    s.className = 'chip';
+    s.textContent = p;
+    el.appendChild(s);
+  }
+}
+
+function updateProsodyVisuals(eng, live) {
+  if (!eng || !live) return;
+  drawProsodyStrip('vib-canvas', eng.vibDepthHistory, '#ff6c8c');
+  drawProsodyStrip('loud-canvas', eng.loudnessHistory, '#6c8cff');
+  drawProsodyStrip('tilt-canvas', eng.tiltHistory, '#4cda7c');
+
+  const v = live.vibrato;
+  setTextChips('vib-chips', [
+    v.active ? 'Vibrato active' : 'No vibrato lock',
+    v.active ? `Rate ${v.rateHz.toFixed(1)} Hz` : `Depth ${v.depthCents.toFixed(0)} ¢`,
+    `Stability ${v.stability.toFixed(2)}`,
+  ]);
+
+  setTextChips('loud-chips', [
+    `${live.smoothDb.toFixed(1)} dB smoothed`,
+    live.flags.loudWobble ? 'Dynamics uneven (local)' : 'Dynamics steady (local)',
+  ]);
+
+  setTextChips('breath-chips', [
+    `Tilt ${live.tilt.toFixed(3)}`,
+    live.flags.breathRising ? 'Breathiness rising (local)' : 'Breathiness flat (local)',
+  ]);
+
+  if (typeof NPFeedback === 'undefined') return;
+  const chips = NPFeedback.feedbackLiveChips(live);
+  const liveEl = document.getElementById('live-feedback-chips');
+  if (!liveEl) return;
+  liveEl.innerHTML = '';
+  for (let i = 0; i < chips.length; i++) {
+    const c = chips[i];
+    const sp = document.createElement('span');
+    let cls = 'chip';
+    if (/unstable|uneven|rising|Little vibrato/i.test(c)) cls += ' warn';
+    if (/Transition/i.test(c)) cls += ' warn';
+    sp.className = cls;
+    sp.textContent = c;
+    liveEl.appendChild(sp);
+  }
+}
+
+function fillSummary(fb) {
+  document.getElementById('summary-text').textContent = fb.summary;
+  const su = document.getElementById('summary-success');
+  const fa = document.getElementById('summary-fail');
+  su.innerHTML = '';
+  fa.innerHTML = '';
+  for (let i = 0; i < fb.successes.length; i++) {
+    const li = document.createElement('li');
+    li.textContent = fb.successes[i];
+    su.appendChild(li);
+  }
+  for (let i = 0; i < fb.failures.length; i++) {
+    const li = document.createElement('li');
+    li.textContent = fb.failures[i];
+    fa.appendChild(li);
+  }
+}
+
+function switchStage(which) {
+  const live = document.getElementById('live-stage');
+  const sum = document.getElementById('summary-stage');
+  const tLive = document.getElementById('tab-live');
+  const tSum = document.getElementById('tab-summary');
+  if (which === 'summary') {
+    live.classList.add('hidden');
+    sum.classList.remove('hidden');
+    tLive.classList.remove('active');
+    tSum.classList.add('active');
+  } else {
+    live.classList.remove('hidden');
+    sum.classList.add('hidden');
+    tLive.classList.add('active');
+    tSum.classList.remove('active');
+  }
+}
+
+function setupProsodyUI() {
+  document.querySelectorAll('.prosody-card .card-toggle').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const card = btn.closest('.prosody-card');
+      card.classList.toggle('collapsed');
+      btn.setAttribute('aria-expanded', String(!card.classList.contains('collapsed')));
+    });
+  });
+  document.getElementById('tab-live').addEventListener('click', () => switchStage('live'));
+  document.getElementById('tab-summary').addEventListener('click', () => {
+    const t = document.getElementById('tab-summary');
+    if (!t.disabled) switchStage('summary');
+  });
+}
+
 // ── Audio Frame Processing (JS <-> WASM Bridge) ────────────────────────────
 //
 // FRAME_SIZE = 160 samples at 16 kHz = 10 ms of audio.
@@ -674,16 +918,26 @@ function updateRtfMeter(rtfHist) {
 // any call that might allocate. In this code, we read results immediately
 // after the processing call and copy them out before freeing.
 //
-// THE OUTPUT STRUCT LAYOUT:
-// ─────────────────────────
-// The C function nanopitch_process_frame() fills an output buffer with:
-//   [0]       = VAD probability        (1 float)
-//   [1..360]  = pitch posteriorgram    (360 floats)
-//   [361]     = f0 in Hz               (1 float)
-//   [362..401]= log-mel features       (40 floats)
-//   Total: 402 floats = 1608 bytes
+// THE OUTPUT STRUCT LAYOUT (NanoPitchOutput — see nanopitch.h):
+//   [0]        = VAD probability        (1 float)
+//   [1..360]   = pitch posteriorgram    (360 floats)
+//   [361]      = f0 in Hz               (1 float)
+//   [362..401] = log-mel features       (40 floats)
+//   Prosody (computed in C after Viterbi):
+//   [402]      = prosody_note_id
+//   [403]      = prosody_is_transition (0/1)
+//   [404]      = prosody_vibrato_active
+//   [405]      = prosody_vibrato_rate_hz
+//   [406]      = prosody_vibrato_depth_cents
+//   [407]      = prosody_vibrato_stability
+//   [408]      = prosody_smooth_rms_db
+//   [409]      = prosody_mel_tilt
+//   [410]      = prosody_raw_rms_db
+//   Total: NC_NP_OUT_FLOATS = 411 (must match nanopitch.h)
 // ─────────────────────────────────────────────────────────────────────────────
 const FRAME_SIZE = 160; // 10ms at 16kHz
+const NP_OUT_FLOATS = 411;
+const NP_PROSODY_BASE = 402;
 
 function processAudioFrame(samples) {
   // Guard: do nothing if WASM module or model weights aren't loaded yet
@@ -702,8 +956,7 @@ function processAudioFrame(samples) {
   }
 
   // Step 3: Allocate space for the output struct in WASM memory.
-  // NanoPitchOutput: vad(1) + pitch(360) + f0(1) + mel(40) = 402 floats
-  const outSize = (1 + 360 + 1 + 40) * 4;
+  const outSize = NP_OUT_FLOATS * 4;
   const outPtr = wasmModule._malloc(outSize);
 
   // Step 4: Call the C inference function via its Emscripten-exported name.
@@ -717,6 +970,7 @@ function processAudioFrame(samples) {
     // Step 5: Read results from WASM memory via the HEAPF32 view.
     // "outPtr >> 2" converts the byte pointer to a float32 index.
     const base = outPtr >> 2;
+    const pb = base + NP_PROSODY_BASE;
     result = {
       vad: wasmModule.HEAPF32[base],
       // Create a Float32Array *view* into WASM memory (zero-copy).
@@ -724,6 +978,15 @@ function processAudioFrame(samples) {
       pitch: new Float32Array(wasmModule.HEAPF32.buffer, outPtr + 1 * 4, 360),
       f0: wasmModule.HEAPF32[base + 361],
       mel: new Float32Array(wasmModule.HEAPF32.buffer, outPtr + 362 * 4, 40),
+      prosodyNoteId: wasmModule.HEAPF32[pb],
+      prosodyIsTransition: wasmModule.HEAPF32[pb + 1],
+      prosodyVibratoActive: wasmModule.HEAPF32[pb + 2],
+      prosodyVibratoRateHz: wasmModule.HEAPF32[pb + 3],
+      prosodyVibratoDepthCents: wasmModule.HEAPF32[pb + 4],
+      prosodyVibratoStability: wasmModule.HEAPF32[pb + 5],
+      prosodySmoothRmsDb: wasmModule.HEAPF32[pb + 6],
+      prosodyMelTilt: wasmModule.HEAPF32[pb + 7],
+      prosodyRawRmsDb: wasmModule.HEAPF32[pb + 8],
     };
 
     // CRITICAL: Copy the arrays out of WASM memory before freeing!
@@ -733,12 +996,7 @@ function processAudioFrame(samples) {
     result.pitch = new Float32Array(result.pitch);
     result.mel = new Float32Array(result.mel);
 
-    // Compute RMS (Root Mean Square) level in decibels.
-    // RMS = sqrt(mean(samples^2)). In dB: 10 * log10(mean(samples^2)).
-    // The +1e-10 prevents log10(0) = -Infinity for silent frames.
-    let sumSq = 0;
-    for (let i = 0; i < FRAME_SIZE; i++) sumSq += samples[i] * samples[i];
-    result.rmsDb = 10 * Math.log10(sumSq / FRAME_SIZE + 1e-10);
+    result.rmsDb = result.prosodyRawRmsDb;
   }
 
   // Step 6: Free the WASM heap allocations to avoid memory leaks.
@@ -819,6 +1077,11 @@ async function startMic() {
   // Toggle behavior: if already running, stop instead
   if (isRunning) { stopMic(); return; }
 
+  if (prosodyEng) NPProsody.prosodyReset(prosodyEng);
+  switchStage('live');
+  const tabSum = document.getElementById('tab-summary');
+  if (tabSum) tabSum.disabled = true;
+
   // Create an AudioContext. We request 16 kHz but the browser may
   // give us a different rate (e.g., 44100 or 48000).
   audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
@@ -872,6 +1135,9 @@ async function startMic() {
       const inferMs = performance.now() - t0;
       const rtf = inferMs / 10.0;
 
+      let snap = null;
+      if (prosodyEng) snap = NPProsody.prosodyAppendFrame(prosodyEng, result);
+
       rtfHistory.push(rtf);
       while (rtfHistory.length > HISTORY) rtfHistory.shift();
 
@@ -899,6 +1165,10 @@ async function startMic() {
         drawRtf(rtfHistory);
         if (result) updateMeters(result);
         updateRtfMeter(rtfHistory);
+        if (prosodyEng && snap && typeof NPProsody !== 'undefined') {
+          const live = NPProsody.prosodyLiveMetricsFromSnapshot(snap, prosodyEng);
+          updateProsodyVisuals(prosodyEng, live);
+        }
       }
 
       // Advance past the consumed frame
@@ -925,6 +1195,25 @@ async function startMic() {
 // everything was fully initialized.
 // ─────────────────────────────────────────────────────────────────────────────
 function stopMic() {
+  if (prosodyEng && typeof NPFeedback !== 'undefined') {
+    const tabSum = document.getElementById('tab-summary');
+    if (prosodyEng.frameIndex > 5) {
+      const post = NPProsody.prosodyRunPostPass(prosodyEng);
+      const fb = NPFeedback.feedbackPostProcess(post, prosodyEng.frameIndex);
+      fillSummary(fb);
+      if (tabSum) tabSum.disabled = false;
+      switchStage('summary');
+    } else if (prosodyEng.frameIndex > 0) {
+      fillSummary({
+        summary: 'That clip was very short. Try several seconds of singing for a richer summary.',
+        successes: [],
+        failures: [],
+      });
+      if (tabSum) tabSum.disabled = false;
+      switchStage('summary');
+    }
+  }
+
   if (processorNode) { processorNode.disconnect(); processorNode = null; }
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
@@ -1135,6 +1424,7 @@ function setStatus(text, ready) {
 }
 
 async function init() {
+  setupProsodyUI();
   // Set up the drag-and-drop / click-to-browse model loading
   setupDragDrop();
 
@@ -1149,6 +1439,7 @@ async function init() {
       wasmModule._nanopitch_reset_state(statePtr, loadedGruSize);
     }
     melHistory = []; pitchHistory = []; waveHistory = []; vadHistory = [];
+    if (prosodyEng) NPProsody.prosodyReset(prosodyEng);
   });
 
   // Check if the WASM glue script has defined the factory function.
